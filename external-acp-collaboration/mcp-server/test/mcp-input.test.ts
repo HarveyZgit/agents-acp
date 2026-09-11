@@ -18,6 +18,7 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   child.stdout.on("data", (chunk: string) => output.push(...chunk.trim().split("\n").filter(Boolean)));
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => errors.push(chunk));
+  child.stdin.write("null\n");
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
     name: "start_external_agent",

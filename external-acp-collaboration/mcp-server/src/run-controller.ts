@@ -181,13 +181,17 @@ export class RunController {
       if (!this.isActive(id)) return;
       this.store.update(id, { sessionId, status: "running" });
       this.acceptEvent(id, { type: "started", provider: request.provider, sessionId });
-      await this.setModeIfAdvertised(runtime, sessionId, request.mode, session);
+      const modeSelected = await this.setModeIfAdvertised(runtime, sessionId, request.mode, session);
+      if (!modeSelected) throw new Error(`Provider did not advertise the required ${request.mode} mode.`);
       if (!this.isActive(id)) return;
       const completion = await runtime.peer.request("session/prompt", {
         sessionId,
         prompt: [{ type: "text", text: request.prompt }],
       });
       if (!this.isActive(id)) return;
+      if (runtime.pendingRequests.size > 0) {
+        throw new Error("Provider completed while a user decision was still pending.");
+      }
       this.acceptEvent(id, {
         type: "completed",
         summary: "Provider completed.",
@@ -195,6 +199,7 @@ export class RunController {
       this.policy.release(runtime.workspace, runtime.mode);
     } catch (error) {
       this.fail(id, error);
+      runtime.peer.terminate();
     }
   }
 
@@ -203,7 +208,7 @@ export class RunController {
     sessionId: string,
     mode: TaskMode,
     session: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const configOptions = Array.isArray(session.configOptions) ? session.configOptions : [];
     const modeOption = configOptions.find((option) => (
       typeof option === "object" && option !== null && (option as { category?: string }).category === "mode"
@@ -211,19 +216,26 @@ export class RunController {
     const providerMode = mode === "implement" ? "agent" : mode === "review" ? "ask" : "plan";
     if (modeOption?.id && modeOption.options?.some((option) => option.value === providerMode)) {
       await runtime.peer.request("session/set_config_option", { sessionId, configId: modeOption.id, value: providerMode });
-      return;
+      return true;
     }
     const modes = Array.isArray(session.availableModes) ? session.availableModes : [];
     if (modes.some((available) => (
       typeof available === "object" && available !== null && (available as { id?: string }).id === providerMode
     ))) {
       await runtime.peer.request("session/set_mode", { sessionId, modeId: providerMode });
+      return true;
     }
+    return false;
   }
 
   private handleProviderMessage(id: string, message: RpcMessage, isRequest: boolean): void {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
+    if (message.method === "acp/invalid_message") {
+      this.fail(id, new Error("Provider emitted an invalid ACP JSON-RPC envelope."));
+      runtime.peer.terminate();
+      return;
+    }
     for (const event of normalizeAcpEvent(runtime.provider.name, message)) this.acceptEvent(id, event);
     if (isRequest && message.id !== undefined && requiresUserDecision(message.method)) {
       const requestId = `rpc-${message.id}`;
@@ -241,6 +253,7 @@ export class RunController {
     const safeEvent = sanitizeEvent(event, runtime.workspace);
     if (!safeEvent) return;
     runtime.events.push(safeEvent);
+    if (runtime.events.length > 500) runtime.events.splice(0, runtime.events.length - 500);
     if (safeEvent.type === "text") runtime.resultText = `${runtime.resultText}${safeEvent.text}`.slice(-1_000_000);
     if (safeEvent.type === "error") runtime.error = "Provider error; inspect the provider's local diagnostics.";
     this.store.appendEvent(id, safeEvent);

@@ -1,4 +1,4 @@
-# Linux Codex installation — external-acp-collaboration 0.1.1
+# Linux Codex installation — external-acp-collaboration 0.1.2
 
 ## Preconditions
 
@@ -88,8 +88,8 @@ workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/external-acp-collaboration-0.1.1.zip` and
-`dist/external-acp-collaboration-0.1.1.tar.gz` are portable copies of the
+`dist/external-acp-collaboration-0.1.2.zip` and
+`dist/external-acp-collaboration-0.1.2.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -97,9 +97,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/external-acp-collaboration-0.1.1.tar.gz
-tar -C . -czf dist/external-acp-collaboration-0.1.1.tar.gz external-acp-collaboration
-rm -f dist/external-acp-collaboration-0.1.1.zip
-zip -qr dist/external-acp-collaboration-0.1.1.zip external-acp-collaboration
-sha256sum dist/external-acp-collaboration-0.1.1.{tar.gz,zip}
+rm -f dist/external-acp-collaboration-0.1.2.tar.gz
+tar -C . -czf dist/external-acp-collaboration-0.1.2.tar.gz external-acp-collaboration
+rm -f dist/external-acp-collaboration-0.1.2.zip
+zip -qr dist/external-acp-collaboration-0.1.2.zip external-acp-collaboration
+sha256sum dist/external-acp-collaboration-0.1.2.{tar.gz,zip}
 ```

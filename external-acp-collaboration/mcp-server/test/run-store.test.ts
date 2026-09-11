@@ -33,3 +33,15 @@ test("run store redacts event detail and refuses concurrent writer lock", () => 
   writeFileSync(`${file}.lock`, String(process.pid), { mode: 0o600 });
   assert.throws(() => store.update(run.id, { status: "running" }), /store is busy/);
 });
+
+test("run store bounds persisted events and changed-file summaries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "external-acp-store-"));
+  const store = new RunStore(join(directory, "runs.json"));
+  const run = store.create({ provider: "grok", cwd: directory, workspace: directory, mode: "review" });
+  for (let index = 0; index < 510; index += 1) {
+    store.appendEvent(run.id, { type: "file_change", path: `file-${index}`, kind: "modify" });
+  }
+  const record = store.get(run.id);
+  assert.equal(record.events.length, 500);
+  assert.equal(record.changedFiles.length, 500);
+});

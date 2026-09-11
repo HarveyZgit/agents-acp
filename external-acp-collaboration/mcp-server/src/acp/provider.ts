@@ -140,10 +140,14 @@ export class JsonRpcPeer {
   }
 
   private receive(line: string): void {
-    let message: RpcMessage;
+    let message: unknown;
     try {
-      message = JSON.parse(line) as RpcMessage;
+      message = JSON.parse(line);
     } catch {
+      this.onNotification({ method: "acp/invalid_message" });
+      return;
+    }
+    if (!isRpcMessage(message)) {
       this.onNotification({ method: "acp/invalid_message" });
       return;
     }
@@ -234,6 +238,18 @@ export function normalizeAcpEvent(provider: ProviderName, message: RpcMessage): 
     return [{ type: "error", message: "Provider emitted an invalid ACP JSON message." }];
   }
   return [];
+}
+
+function isRpcMessage(value: unknown): value is RpcMessage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const message = value as Record<string, unknown>;
+  if (message.jsonrpc !== "2.0") return false;
+  if (message.id !== undefined && typeof message.id !== "string" && typeof message.id !== "number") return false;
+  if (message.method !== undefined && typeof message.method !== "string") return false;
+  if (message.params !== undefined && (!message.params || typeof message.params !== "object" || Array.isArray(message.params))) return false;
+  if (message.result !== undefined && (!message.result || typeof message.result !== "object" || Array.isArray(message.result))) return false;
+  if (message.error !== undefined && (!message.error || typeof message.error !== "object" || Array.isArray(message.error))) return false;
+  return message.method !== undefined || message.id !== undefined;
 }
 
 export function baseEnvironment(): NodeJS.ProcessEnv {

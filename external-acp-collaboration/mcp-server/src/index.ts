@@ -51,12 +51,18 @@ const tools = [
 
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", async (line) => {
-  let request: JsonRpcRequest;
+  let parsed: unknown;
   try {
-    request = JSON.parse(line) as JsonRpcRequest;
+    parsed = JSON.parse(line);
   } catch {
     return;
   }
+  if (!isRequest(parsed)) {
+    const id = objectId(parsed);
+    if (id !== undefined) respondError(id, "Invalid JSON-RPC request.");
+    return;
+  }
+  const request = parsed;
   if (!request.method) return;
   try {
     const result = await dispatch(request.method, asObject(request.params ?? {}));
@@ -75,7 +81,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "external-acp-collaboration", version: "0.1.1" },
+        serverInfo: { name: "external-acp-collaboration", version: "0.1.2" },
         instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending and cannot be auto-approved through this server.",
       };
     case "ping":
@@ -223,3 +229,18 @@ type JsonRpcRequest = {
   method?: string;
   params?: Record<string, unknown>;
 };
+
+function isRequest(value: unknown): value is JsonRpcRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const request = value as Record<string, unknown>;
+  return request.jsonrpc === "2.0"
+    && typeof request.method === "string"
+    && (request.id === undefined || typeof request.id === "string" || typeof request.id === "number")
+    && (request.params === undefined || (request.params !== null && typeof request.params === "object" && !Array.isArray(request.params)));
+}
+
+function objectId(value: unknown): number | string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === "string" || typeof id === "number" ? id : undefined;
+}

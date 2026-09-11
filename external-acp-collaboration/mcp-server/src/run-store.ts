@@ -55,6 +55,7 @@ export class RunStore {
         events: [],
       };
       this.data.runs.push(record);
+      pruneTerminalRuns(this.data.runs);
       return structuredClone(record);
     });
   }
@@ -85,9 +86,14 @@ export class RunStore {
       const record = this.require(id);
       // Text can contain user-provided material echoed by a provider. Keep it
       // in the in-memory controller only; never persist it to the session file.
-      if (event.type !== "text") record.events.push(persistedEvent(event));
+      if (event.type !== "text") {
+        record.events.push(persistedEvent(event));
+        if (record.events.length > 500) record.events.splice(0, record.events.length - 500);
+      }
       if (event.type === "activity") record.lastActivity = "Agent reported progress";
-      if (event.type === "file_change") record.changedFiles.push({ path: event.path, kind: event.kind });
+      if (event.type === "file_change" && record.changedFiles.length < 500) {
+        record.changedFiles.push({ path: event.path, kind: event.kind });
+      }
       if (event.type === "error") record.error = "Provider reported an error; inspect the live result for details.";
       if (event.type === "completed") {
         record.status = "completed";
@@ -235,5 +241,18 @@ function markDeadOwnersInterrupted(runs: RunRecord[]): void {
       run.status = "interrupted";
       run.updatedAt = now;
     }
+  }
+}
+
+function pruneTerminalRuns(runs: RunRecord[]): void {
+  const maximumRuns = 200;
+  if (runs.length <= maximumRuns) return;
+  const terminal = runs
+    .filter((run) => !isActive(run.status))
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+  while (runs.length > maximumRuns && terminal.length > 0) {
+    const oldest = terminal.shift();
+    const index = runs.findIndex((run) => run.id === oldest?.id);
+    if (index >= 0) runs.splice(index, 1);
   }
 }

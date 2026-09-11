@@ -56,7 +56,8 @@ test("JSON-RPC peer resolves requests and normalizes provider events", async () 
   });
   assert.deepEqual(normalized, [{ type: "text", text: "hello" }]);
   transport.emit({ jsonrpc: "2.0", method: "cursor/update_todos", params: {} });
-  assert.deepEqual(events, ["cursor/update_todos"]);
+  transport.emit(null);
+  assert.deepEqual(events, ["cursor/update_todos", "acp/invalid_message"]);
 });
 
 test("model arguments are passed only through documented provider capabilities", () => {
@@ -96,6 +97,12 @@ class MockProvider extends AcpProvider {
   };
   readonly transport = new FakeTransport();
   private permissionRequested = false;
+  private readonly completeBeforePermission: boolean;
+
+  constructor(completeBeforePermission = false) {
+    super();
+    this.completeBeforePermission = completeBeforePermission;
+  }
 
   command(_options: StartOptions): string[] {
     return ["agent", "stdio"];
@@ -118,11 +125,22 @@ class MockProvider extends AcpProvider {
       const results: Record<string, unknown> = {
         initialize: { authMethods: [{ id: "cached_token" }] },
         authenticate: {},
-        "session/new": { sessionId: "mock-session" },
+        "session/new": {
+          sessionId: "mock-session",
+          configOptions: [{
+            id: "mode",
+            category: "mode",
+            options: [{ value: "plan" }],
+          }],
+        },
+        "session/set_config_option": {},
       };
       if (message.method === "session/prompt") {
         this.transport.emit({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "mocked answer" } } } });
         this.transport.emit({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: {} });
+        if (this.completeBeforePermission) {
+          this.transport.emit({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+        }
         return;
       }
       this.transport.emit({ jsonrpc: "2.0", id: message.id, result: results[message.method] ?? {} });
@@ -153,4 +171,13 @@ test("controller leaves permission pending and safely cancels without auto-appro
   const cancelled = await controller.cancel(run.id);
   assert.equal(cancelled.status, "cancelled");
   assert.equal(controller.result(run.id).status, "cancelled");
+});
+
+test("controller terminates a provider that completes while permission remains pending", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider(true);
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(controller.status(run.id).status, "failed");
 });
