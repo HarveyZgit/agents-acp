@@ -1,0 +1,20 @@
+{
+  "name": "agents-acp",
+  "interface": {
+    "displayName": "Agents ACP"
+  },
+  "plugins": [
+    {
+      "name": "external-acp-collaboration",
+      "source": {
+        "source": "local",
+        "path": "./external-acp-collaboration"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

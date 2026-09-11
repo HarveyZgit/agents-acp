@@ -1,0 +1,7 @@
+{
+  "name": "external-acp-collaboration",
+  "version": "0.1.0",
+  "description": "Delegate Codex tasks to locally installed ACP-capable coding agents.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
