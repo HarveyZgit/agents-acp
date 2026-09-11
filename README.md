@@ -24,43 +24,28 @@ Policy is enforced before launch:
 
 - `review` and `plan` are read-only scheduling modes and can run in parallel.
 - `implement` maps to the provider's `agent` mode, requires
-  `allowImplement: true`, and is serialized per configured workspace.
+  `allowImplement: true` plus a local unsandboxed-write opt-in, and is
+  serialized per configured workspace.
 - `cwd` must be the configured active workspace or an explicitly authorized
-  subtree.
-- ACP permissions are never approved automatically. The caller must answer
-  through `respond_external_agent_request`.
+  subtree. Real paths are checked, so symlinks cannot escape the workspace.
+- ACP permissions are never approved automatically. They remain pending and
+  can be cancelled; there is no model-callable approval tool.
 
 Model selection is intentionally provider-specific. Grok Build's documented
 ACP startup flag supports `--model`; Cursor's documented `agent acp` interface
 does not document a model parameter, so the Cursor adapter rejects `model`
 instead of adding it to task text.
 
-## Local installation in Codex Desktop
+## Linux Codex installation
 
-1. Clone this repository locally. It includes the required repo marketplace at
-   `.agents/plugins/marketplace.json`, whose `./external-acp-collaboration`
-   source path resolves from the repository root.
-2. Add that repository as a local marketplace:
+Use the detailed, versioned commands in [INSTALL.md](INSTALL.md). In short,
+clone this repository, configure the workspace boundary in the environment
+that launches Codex, and add the repository as a documented local marketplace:
 
-   ```bash
-   codex plugin marketplace add /absolute/path/to/agents-acp
-   ```
-
-   Alternatively, copy the same marketplace JSON to a personal marketplace and
-   retain a `./` plugin path within that marketplace root.
-3. Restart the desktop app, install the plugin from that marketplace, then
-   enable its bundled MCP server. The plugin requires Node.js 22.6+ because it
-   runs its dependency-free TypeScript with Node's
-   `--experimental-strip-types` flag.
-4. Configure the intended active project before enabling the MCP server:
-
-   ```text
-   EXTERNAL_ACP_WORKSPACE=/absolute/path/to/project
-   EXTERNAL_ACP_ALLOWED_SUBTREES=/absolute/path/to/project/packages
-   ```
-
-   `EXTERNAL_ACP_ALLOWED_SUBTREES` uses the operating system path separator.
-   Do not put secrets in this configuration.
+```bash
+export EXTERNAL_ACP_WORKSPACE=/absolute/path/to/project
+codex plugin marketplace add /absolute/path/to/agents-acp
+```
 
 The `.mcp.json` file follows the current documented Codex bundled-MCP
 `mcp_servers` shape. It exposes structured tool responses and an
@@ -98,9 +83,10 @@ npm test
 ```
 
 Finally, in Codex, call `list_external_agent_providers`, start a harmless
-`review` or `plan` run, verify status/result tools and the resource, explicitly
-reject one permission request if offered, and only then test an opted-in
-`implement` run in a disposable workspace.
+`review` or `plan` run, and verify status/result tools and the resource. If a
+permission is requested, confirm it stays pending and cancel the run. Test
+`implement` only in a disposable workspace after the two explicit opt-ins
+documented in `INSTALL.md`.
 
 ## Verification boundaries
 

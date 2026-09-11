@@ -5,12 +5,19 @@ import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
 import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
-const workspace = process.env.EXTERNAL_ACP_WORKSPACE ?? process.cwd();
-const authorizedSubtrees = (process.env.EXTERNAL_ACP_ALLOWED_SUBTREES ?? "")
+const workspace = process.env.EXTERNAL_ACP_WORKSPACE;
+const authorizedSubtrees = (workspace ? (process.env.EXTERNAL_ACP_ALLOWED_SUBTREES ?? "") : "")
   .split(path.delimiter)
   .filter(Boolean);
 const store = new RunStore(process.env.EXTERNAL_ACP_STORE_PATH);
-const controller = new RunController(store, new WorkspacePolicy(workspace, authorizedSubtrees));
+const configurationError = workspace
+  ? undefined
+  : "EXTERNAL_ACP_WORKSPACE must be set to an existing absolute workspace path before starting or resuming a run.";
+const controller = new RunController(
+  store,
+  new WorkspacePolicy(workspace ?? process.cwd(), authorizedSubtrees, process.env.EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT === "1"),
+);
+let initialized = false;
 
 const tools = [
   tool("list_external_agent_providers", "Discover locally installed ACP providers and their documented capabilities.", { type: "object", properties: {} }),
@@ -18,10 +25,10 @@ const tools = [
     type: "object",
     required: ["provider", "cwd", "prompt", "mode"],
     properties: {
-      provider: { enum: ["cursor", "grok"] },
+      provider: { type: "string", enum: ["cursor", "grok"] },
       cwd: { type: "string" },
       prompt: { type: "string", description: "Sent only to the provider process and never persisted." },
-      mode: { enum: ["review", "plan", "implement"] },
+      mode: { type: "string", enum: ["review", "plan", "implement"] },
       allowImplement: { type: "boolean" },
       model: { type: "string" },
     },
@@ -40,15 +47,6 @@ const tools = [
     },
   }),
   tool("get_external_agent_result", "Return final in-memory text, changed-file summary, errors, and verification advice.", schema(["runId"])),
-  tool("respond_external_agent_request", "Explicitly answer a pending ACP permission or provider decision. This plugin never auto-approves requests.", {
-    type: "object",
-    required: ["runId", "requestId", "response"],
-    properties: {
-      runId: { type: "string" },
-      requestId: { type: "string" },
-      response: { type: "object", description: "Provider-specific ACP response selected by the user." },
-    },
-  }),
 ];
 
 const input = readline.createInterface({ input: process.stdin });
@@ -61,7 +59,7 @@ input.on("line", async (line) => {
   }
   if (!request.method) return;
   try {
-    const result = await dispatch(request.method, request.params ?? {});
+    const result = await dispatch(request.method, asObject(request.params ?? {}));
     if (request.id !== undefined) respond(request.id, result);
   } catch (error) {
     if (request.id !== undefined) {
@@ -73,20 +71,27 @@ input.on("line", async (line) => {
 async function dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
   switch (method) {
     case "initialize":
+      initialized = true;
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "external-acp-collaboration", version: "0.1.0" },
+        serverInfo: { name: "external-acp-collaboration", version: "0.1.1" },
+        instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending and cannot be auto-approved through this server.",
       };
     case "ping":
       return {};
+    default:
+      if (!initialized) throw new Error("MCP initialize must complete before this method.");
+  }
+  switch (method) {
     case "tools/list":
       return { tools };
     case "tools/call":
-      return callTool(String(params.name ?? ""), asObject(params.arguments));
+      return callTool(requiredString(params.name, "tool name", 100), asObject(params.arguments ?? {}));
     case "resources/list":
+      return { resources: [] };
+    case "resources/templates/list":
       return {
-        resources: [],
         resourceTemplates: [{
           uriTemplate: "external-acp://runs/{runId}",
           name: "External ACP run panel",
@@ -95,7 +100,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         }],
       };
     case "resources/read": {
-      const uri = String(params.uri ?? "");
+      const uri = requiredString(params.uri, "resource URI", 512, true);
       const match = /^external-acp:\/\/runs\/([^/]+)$/.exec(uri);
       if (!match) throw new Error("Unknown resource URI.");
       const run = controller.status(match[1]);
@@ -111,38 +116,43 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
     let result: unknown;
     switch (name) {
       case "list_external_agent_providers":
+        onlyKeys(args, []);
         result = controller.listProviders();
         break;
       case "start_external_agent":
+        onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
+        requireWorkspaceConfiguration();
         result = controller.start({
           provider: stringEnum(args.provider, ["cursor", "grok"]),
-          cwd: requiredString(args.cwd),
-          prompt: requiredString(args.prompt),
+          cwd: requiredString(args.cwd, "cwd", 4_096, true),
+          prompt: requiredString(args.prompt, "prompt", 65_536),
           mode: stringEnum(args.mode, ["review", "plan", "implement"]),
           allowImplement: args.allowImplement === true,
-          model: optionalString(args.model),
+          model: optionalString(args.model, "model", 256),
         });
         break;
       case "get_external_agent_status":
-        result = controller.status(requiredString(args.runId));
+        onlyKeys(args, ["runId"]);
+        result = controller.status(requiredString(args.runId, "runId", 128));
         break;
       case "cancel_external_agent":
-        result = await controller.cancel(requiredString(args.runId));
+        onlyKeys(args, ["runId"]);
+        result = await controller.cancel(requiredString(args.runId, "runId", 128));
         break;
       case "resume_external_agent":
+        onlyKeys(args, ["runId", "provider", "sessionId", "followUp", "allowImplement"]);
+        requireWorkspaceConfiguration();
         result = controller.resume({
-          runId: optionalString(args.runId),
+          runId: optionalString(args.runId, "runId", 128),
           provider: args.provider === undefined ? undefined : stringEnum(args.provider, ["cursor", "grok"]),
-          sessionId: optionalString(args.sessionId),
-          followUp: requiredString(args.followUp),
+          sessionId: optionalString(args.sessionId, "sessionId", 512),
+          followUp: requiredString(args.followUp, "followUp", 65_536),
           allowImplement: args.allowImplement === true,
         });
         break;
       case "get_external_agent_result":
-        result = controller.result(requiredString(args.runId));
-        break;
-      case "respond_external_agent_request":
-        result = controller.respond(requiredString(args.runId), requiredString(args.requestId), asObject(args.response));
+        onlyKeys(args, ["runId"]);
+        result = controller.result(requiredString(args.runId, "runId", 128));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -182,14 +192,25 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function requiredString(value: unknown): string {
-  if (typeof value !== "string" || !value) throw new Error("Expected a non-empty string.");
+function onlyKeys(value: Record<string, unknown>, allowed: string[]): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) throw new Error(`Unexpected tool argument: ${unexpected[0]}`);
+}
+
+function requiredString(value: unknown, name: string, maximumLength: number, forbidControl = false): string {
+  if (typeof value !== "string" || !value || value.length > maximumLength || (forbidControl && /[\0-\x1f\x7f]/.test(value))) {
+    throw new Error(`Expected ${name} to be a non-empty string no longer than ${maximumLength} characters.`);
+  }
   return value;
 }
 
-function optionalString(value: unknown): string | undefined {
+function optionalString(value: unknown, name: string, maximumLength: number): string | undefined {
   if (value === undefined) return undefined;
-  return requiredString(value);
+  return requiredString(value, name, maximumLength);
+}
+
+function requireWorkspaceConfiguration(): void {
+  if (configurationError) throw new Error(configurationError);
 }
 
 function stringEnum<T extends string>(value: unknown, values: readonly T[]): T {

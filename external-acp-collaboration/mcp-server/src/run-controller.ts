@@ -1,11 +1,11 @@
 import { CursorProvider } from "./acp/cursor.ts";
 import { GrokProvider } from "./acp/grok.ts";
+import path from "node:path";
 import {
   AcpProvider,
   JsonRpcPeer,
   normalizeAcpEvent,
   type ProviderName,
-  type RpcMessage,
   type RunEvent,
   type TaskMode,
 } from "./acp/provider.ts";
@@ -28,7 +28,7 @@ type RuntimeRun = {
   mode: TaskMode;
   workspace: string;
   events: RunEvent[];
-  pendingRequests: Map<string, RpcMessage>;
+  pendingRequests: Set<string>;
   resultText: string;
   error?: string;
 };
@@ -75,7 +75,7 @@ export class RunController {
         mode: request.mode,
         workspace: decision.workspace,
         events: [],
-        pendingRequests: new Map(),
+        pendingRequests: new Set(),
         resultText: "",
       };
       const peer = new JsonRpcPeer(
@@ -102,7 +102,7 @@ export class RunController {
       ...record,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
-      pendingRequests: [...(runtime?.pendingRequests.keys() ?? [])],
+      pendingRequests: [...(runtime?.pendingRequests ?? [])],
     };
   }
 
@@ -124,20 +124,32 @@ export class RunController {
   async cancel(id: string): Promise<RunRecord> {
     const record = this.store.get(id);
     const runtime = this.requireRuntime(id);
-    if (!record.sessionId) throw new Error("Run has not created an ACP session yet.");
-    await runtime.peer.request("session/cancel", { sessionId: record.sessionId });
-    runtime.peer.terminate();
-    this.policy.release(runtime.workspace, runtime.mode);
-    return this.store.update(id, { status: "cancelled" });
+    if (isTerminal(record.status)) return record;
+    try {
+      if (record.sessionId) {
+        await runtime.peer.request("session/cancel", { sessionId: record.sessionId }, 5_000);
+      }
+    } finally {
+      // Set terminal state before killing the process so an exit callback
+      // cannot rewrite a cancelled run as failed.
+      const cancelled = this.store.update(id, { status: "cancelled" });
+      this.policy.release(runtime.workspace, runtime.mode);
+      runtime.peer.terminate();
+      return cancelled;
+    }
   }
 
   resume(input: { runId?: string; provider?: ProviderName; sessionId?: string; followUp: string; allowImplement?: boolean }): RunRecord {
-    const previous = input.runId
-      ? this.store.get(input.runId)
-      : input.provider && input.sessionId
-        ? this.store.findBySession(input.provider, input.sessionId)
-        : undefined;
+    const hasRunId = input.runId !== undefined;
+    const hasProviderSession = input.provider !== undefined || input.sessionId !== undefined;
+    if (hasRunId === hasProviderSession || (hasProviderSession && (!input.provider || !input.sessionId))) {
+      throw new Error("Provide exactly one resume reference: runId or both provider and sessionId.");
+    }
+    const previous = hasRunId
+      ? this.store.get(input.runId as string)
+      : this.store.findBySession(input.provider as ProviderName, input.sessionId as string);
     if (!previous?.sessionId) throw new Error("A prior run with a provider session ID is required to resume.");
+    if (!isTerminal(previous.status)) throw new Error("Only a completed, failed, cancelled, or interrupted run may be resumed.");
     return this.start({
       provider: previous.provider,
       cwd: previous.cwd,
@@ -148,15 +160,6 @@ export class RunController {
     });
   }
 
-  respond(id: string, requestId: string, response: Record<string, unknown>): RunRecord {
-    const runtime = this.requireRuntime(id);
-    const message = runtime.pendingRequests.get(requestId);
-    if (!message || message.id === undefined) throw new Error(`No pending request named ${requestId}.`);
-    runtime.peer.respond(message.id, response);
-    runtime.pendingRequests.delete(requestId);
-    return this.store.update(id, { status: "running" });
-  }
-
   private async initialize(id: string, request: StartRequest): Promise<void> {
     const runtime = this.requireRuntime(id);
     try {
@@ -165,24 +168,29 @@ export class RunController {
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
         clientInfo: { name: "external-acp-collaboration", version: "0.1.0" },
       });
+      if (!this.isActive(id)) return;
       const authMethod = runtime.provider.authenticationMethod(initialized);
       if (!authMethod) throw new Error(`No supported local authentication method was advertised by ${request.provider}.`);
       await runtime.peer.request("authenticate", { methodId: authMethod });
+      if (!this.isActive(id)) return;
       const session = request.sessionId
         ? await runtime.peer.request("session/load", { sessionId: request.sessionId, cwd: request.cwd })
         : await runtime.peer.request("session/new", { cwd: request.cwd, mcpServers: [] });
       const sessionId = String(session.sessionId ?? "");
       if (!sessionId) throw new Error("ACP provider did not return a session ID.");
+      if (!this.isActive(id)) return;
       this.store.update(id, { sessionId, status: "running" });
       this.acceptEvent(id, { type: "started", provider: request.provider, sessionId });
       await this.setModeIfAdvertised(runtime, sessionId, request.mode, session);
+      if (!this.isActive(id)) return;
       const completion = await runtime.peer.request("session/prompt", {
         sessionId,
         prompt: [{ type: "text", text: request.prompt }],
       });
+      if (!this.isActive(id)) return;
       this.acceptEvent(id, {
         type: "completed",
-        summary: String(completion.stopReason ?? "Provider completed."),
+        summary: "Provider completed.",
       });
       this.policy.release(runtime.workspace, runtime.mode);
     } catch (error) {
@@ -217,20 +225,25 @@ export class RunController {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
     for (const event of normalizeAcpEvent(runtime.provider.name, message)) this.acceptEvent(id, event);
-    if (isRequest && message.id !== undefined) {
+    if (isRequest && message.id !== undefined && requiresUserDecision(message.method)) {
       const requestId = `rpc-${message.id}`;
-      runtime.pendingRequests.set(requestId, message);
+      runtime.pendingRequests.add(requestId);
       this.store.update(id, { status: "waiting_permission" });
+    } else if (isRequest && message.id !== undefined) {
+      runtime.peer.respondError(message.id, -32601, "This ACP client does not support that request.");
     }
   }
 
   private acceptEvent(id: string, event: RunEvent): void {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
-    runtime.events.push(event);
-    if (event.type === "text") runtime.resultText += event.text;
-    if (event.type === "error") runtime.error = event.message;
-    this.store.appendEvent(id, event);
+    if (!this.isActive(id) && event.type !== "completed") return;
+    const safeEvent = sanitizeEvent(event, runtime.workspace);
+    if (!safeEvent) return;
+    runtime.events.push(safeEvent);
+    if (safeEvent.type === "text") runtime.resultText = `${runtime.resultText}${safeEvent.text}`.slice(-1_000_000);
+    if (safeEvent.type === "error") runtime.error = "Provider error; inspect the provider's local diagnostics.";
+    this.store.appendEvent(id, safeEvent);
   }
 
   private handleExit(id: string, code: number | null): void {
@@ -242,9 +255,11 @@ export class RunController {
   }
 
   private fail(id: string, error: unknown): void {
+    const record = this.store.get(id);
+    if (isTerminal(record.status)) return;
     const runtime = this.runtime.get(id);
     if (runtime) {
-      runtime.error = error instanceof Error ? error.message : "Provider failure";
+      runtime.error = "Provider error; inspect the provider's local diagnostics.";
       this.policy.release(runtime.workspace, runtime.mode);
     }
     this.store.update(id, { status: "failed" });
@@ -256,4 +271,27 @@ export class RunController {
     if (!runtime) throw new Error("The run is not active in this MCP server process.");
     return runtime;
   }
+
+  private isActive(id: string): boolean {
+    return !isTerminal(this.store.get(id).status);
+  }
+}
+
+function isTerminal(status: RunRecord["status"]): boolean {
+  return ["completed", "cancelled", "failed", "interrupted"].includes(status);
+}
+
+function requiresUserDecision(method: string | undefined): boolean {
+  return method === "session/request_permission"
+    || method === "cursor/ask_question"
+    || method === "cursor/create_plan";
+}
+
+function sanitizeEvent(event: RunEvent, workspace: string): RunEvent | undefined {
+  if (event.type !== "file_change") return event;
+  if (event.path.includes("\0")) return undefined;
+  const absolute = path.resolve(workspace, event.path);
+  const relative = path.relative(workspace, absolute);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  return { ...event, path: relative || "." };
 }

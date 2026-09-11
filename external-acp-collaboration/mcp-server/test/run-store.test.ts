@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,4 +17,19 @@ test("run store persists lifecycle metadata but never streamed text", () => {
   assert.equal(restored.events.some((event) => event.type === "text"), false);
   assert.deepEqual(restored.changedFiles, [{ path: "src/index.ts", kind: "modify" }]);
   assert.equal(readFileSync(file, "utf8").includes("prompt secret"), false);
+});
+
+test("run store redacts event detail and refuses concurrent writer lock", () => {
+  const directory = mkdtempSync(join(tmpdir(), "external-acp-store-"));
+  const file = join(directory, "runs.json");
+  const store = new RunStore(file);
+  const run = store.create({ provider: "grok", cwd: directory, workspace: directory, mode: "review" });
+  store.appendEvent(run.id, { type: "activity", label: "token=super-secret", detail: "authorization=secret" });
+  store.appendEvent(run.id, { type: "completed", summary: "secret output", exitCode: 0 });
+  const persisted = readFileSync(file, "utf8");
+  assert.equal(persisted.includes("super-secret"), false);
+  assert.equal(persisted.includes("secret output"), false);
+
+  writeFileSync(`${file}.lock`, String(process.pid), { mode: 0o600 });
+  assert.throws(() => store.update(run.id, { status: "running" }), /store is busy/);
 });

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import type { TaskMode } from "./acp/provider.ts";
 
 export type PolicyRequest = {
@@ -18,10 +18,15 @@ export class WorkspacePolicy {
   private readonly implementingWorkspaces = new Set<string>();
   private readonly workspace: string;
   private readonly allowedRoots: string[];
+  private readonly allowUnsandboxedImplement: boolean;
 
-  constructor(workspace: string, authorizedSubtrees: string[] = []) {
+  constructor(workspace: string, authorizedSubtrees: string[] = [], allowUnsandboxedImplement = false) {
     this.workspace = canonical(workspace);
     this.allowedRoots = [this.workspace, ...authorizedSubtrees.map(canonical)];
+    this.allowUnsandboxedImplement = allowUnsandboxedImplement;
+    if (this.allowedRoots.some((root) => !inside(this.workspace, root))) {
+      throw new Error("Each authorized subtree must be inside the configured active workspace.");
+    }
   }
 
   authorize(request: PolicyRequest): PolicyDecision {
@@ -32,6 +37,9 @@ export class WorkspacePolicy {
     }
     if (request.mode === "implement" && request.allowImplement !== true) {
       throw new Error("Implement mode requires explicit allowImplement: true.");
+    }
+    if (request.mode === "implement" && !this.allowUnsandboxedImplement) {
+      throw new Error("Implement mode is disabled until EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT=1 is explicitly configured.");
     }
     return { cwd, workspace: this.workspace, readOnly: request.mode !== "implement" };
   }
@@ -53,11 +61,11 @@ function canonical(value: string): string {
   if (!value || value.includes("\0")) throw new Error("cwd must be a non-empty filesystem path.");
   const resolved = path.resolve(value);
   try {
-    return realpathSync(resolved);
+    const real = realpathSync(resolved);
+    if (!statSync(real).isDirectory()) throw new Error("not a directory");
+    return real;
   } catch {
-    // A missing cwd will be rejected by process spawn. Keep the resolved value
-    // here so policy failures remain deterministic before launch.
-    return resolved;
+    throw new Error("cwd must be an existing accessible directory.");
   }
 }
 

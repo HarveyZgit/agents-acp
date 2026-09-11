@@ -1,5 +1,7 @@
 import {
   AcpProvider,
+  addEnvironmentVariables,
+  baseEnvironment,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
@@ -26,5 +28,9 @@ export class CursorProvider extends AcpProvider {
     return methods.some((method) => (
       typeof method === "object" && method !== null && (method as { id?: string }).id === "cursor_login"
     )) ? "cursor_login" : undefined;
+  }
+
+  protected environment(): NodeJS.ProcessEnv {
+    return addEnvironmentVariables(baseEnvironment(), ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"]);
   }
 }

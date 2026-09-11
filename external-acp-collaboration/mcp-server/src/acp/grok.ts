@@ -1,5 +1,7 @@
 import {
   AcpProvider,
+  addEnvironmentVariables,
+  baseEnvironment,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
@@ -15,6 +17,9 @@ export class GrokProvider extends AcpProvider {
   };
 
   command(options: StartOptions): string[] {
+    if (options.model && (!/^[A-Za-z0-9._:/-]{1,128}$/.test(options.model) || options.model.startsWith("-"))) {
+      throw new Error("Grok model must be a documented model identifier and cannot be interpreted as a CLI flag.");
+    }
     const modelArgs = options.model ? ["--model", options.model] : [];
     // --no-auto-update is documented for ACP scripting. Deliberately omit
     // --always-approve: each permission must remain a user decision.
@@ -32,5 +37,9 @@ export class GrokProvider extends AcpProvider {
     // The CLI, not this plugin, reads a pre-existing environment credential.
     if (ids.has("xai.api_key") && process.env.XAI_API_KEY) return "xai.api_key";
     return undefined;
+  }
+
+  protected environment(): NodeJS.ProcessEnv {
+    return addEnvironmentVariables(baseEnvironment(), ["XAI_API_KEY"]);
   }
 }

@@ -107,16 +107,32 @@ export class JsonRpcPeer {
     });
   }
 
-  request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  request(method: string, params: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`${method} timed out`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.transport.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
   }
 
   respond(id: number | string, result: Record<string, unknown>): void {
     this.transport.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  }
+
+  respondError(id: number | string, code: number, message: string): void {
+    this.transport.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
   }
 
   terminate(): void {
@@ -157,13 +173,17 @@ export abstract class AcpProvider {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
+      env: baseEnvironment(),
+      stdio: ["ignore", "pipe", "ignore"],
     });
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().split("\n")[0];
+    const output = typeof result.stdout === "string"
+      ? sanitizeVersion(result.stdout)
+      : undefined;
     return {
       provider: this.name,
       available: !result.error && result.status === 0,
       executable: this.executable,
-      version: output || undefined,
+      version: output,
       capabilities: this.capabilities,
       note: result.error ? "Executable was not found on PATH." : undefined,
     };
@@ -176,7 +196,12 @@ export abstract class AcpProvider {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       windowsHide: true,
+      env: this.environment(),
     }));
+  }
+
+  protected environment(): NodeJS.ProcessEnv {
+    return baseEnvironment();
   }
 }
 
@@ -209,4 +234,36 @@ export function normalizeAcpEvent(provider: ProviderName, message: RpcMessage): 
     return [{ type: "error", message: "Provider emitted an invalid ACP JSON message." }];
   }
   return [];
+}
+
+export function baseEnvironment(): NodeJS.ProcessEnv {
+  const allowed = [
+    "HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "TMPDIR", "TMP", "TEMP", "TERM", "COLORTERM", "NO_COLOR",
+  ];
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of allowed) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
+
+export function addEnvironmentVariables(
+  environment: NodeJS.ProcessEnv,
+  names: string[],
+): NodeJS.ProcessEnv {
+  const result = { ...environment };
+  for (const name of names) {
+    if (process.env[name] !== undefined) result[name] = process.env[name];
+  }
+  return result;
+}
+
+function sanitizeVersion(value: string): string | undefined {
+  const firstLine = value.split(/\r?\n/, 1)[0]
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 200);
+  return firstLine || undefined;
 }

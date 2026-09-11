@@ -1,16 +1,17 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { ProviderName, RunEvent, TaskMode } from "./acp/provider.ts";
 
-export type RunStatus = "starting" | "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
+export type RunStatus = "starting" | "running" | "waiting_permission" | "completed" | "failed" | "cancelled" | "interrupted";
 export type RunRecord = {
   id: string;
   provider: ProviderName;
   cwd: string;
   workspace: string;
   mode: TaskMode;
+  ownerPid: number;
   status: RunStatus;
   sessionId?: string;
   startedAt: string;
@@ -31,60 +32,75 @@ export class RunStore {
   constructor(filePath = join(homedir(), ".codex", "external-acp-collaboration", "runs.json")) {
     this.filePath = filePath;
     this.data = this.load();
+    this.reconcileInterruptedRuns();
   }
 
   create(input: Pick<RunRecord, "provider" | "cwd" | "workspace" | "mode">): RunRecord {
-    const now = new Date().toISOString();
-    const record: RunRecord = {
-      id: randomUUID(),
-      ...input,
-      status: "starting",
-      startedAt: now,
-      updatedAt: now,
-      changedFiles: [],
-      events: [],
-    };
-    this.data.runs.push(record);
-    this.save();
-    return record;
+    return this.mutate(() => {
+      markDeadOwnersInterrupted(this.data.runs);
+      if (input.mode === "implement" && this.data.runs.some((run) => (
+        run.workspace === input.workspace && run.mode === "implement" && isActive(run.status)
+      ))) {
+        throw new Error("An implement run is already active for this workspace.");
+      }
+      const now = new Date().toISOString();
+      const record: RunRecord = {
+        id: randomUUID(),
+        ...input,
+        ownerPid: process.pid,
+        status: "starting",
+        startedAt: now,
+        updatedAt: now,
+        changedFiles: [],
+        events: [],
+      };
+      this.data.runs.push(record);
+      return structuredClone(record);
+    });
   }
 
   get(id: string): RunRecord {
+    this.data = this.load();
     const record = this.data.runs.find((run) => run.id === id);
     if (!record) throw new Error(`Unknown run: ${id}`);
     return structuredClone(record);
   }
 
   findBySession(provider: ProviderName, sessionId: string): RunRecord | undefined {
+    this.data = this.load();
     const record = this.data.runs.find((run) => run.provider === provider && run.sessionId === sessionId);
     return record && structuredClone(record);
   }
 
   update(id: string, update: Partial<Omit<RunRecord, "id" | "events" | "changedFiles">>): RunRecord {
-    const record = this.require(id);
-    Object.assign(record, update, { updatedAt: new Date().toISOString() });
-    this.save();
-    return structuredClone(record);
+    return this.mutate(() => {
+      const record = this.require(id);
+      Object.assign(record, update, { updatedAt: new Date().toISOString() });
+      return structuredClone(record);
+    });
   }
 
   appendEvent(id: string, event: RunEvent): RunRecord {
-    const record = this.require(id);
-    // Text can contain user-provided material echoed by a provider. Keep it
-    // in the in-memory controller only; never persist it to the session file.
-    if (event.type !== "text") record.events.push(event);
-    if (event.type === "activity") record.lastActivity = event.label;
-    if (event.type === "file_change") record.changedFiles.push({ path: event.path, kind: event.kind });
-    if (event.type === "error") record.error = "Provider reported an error; inspect the live result for details.";
-    if (event.type === "completed") {
-      record.status = "completed";
-      record.completed = { exitCode: event.exitCode };
-    }
-    record.updatedAt = new Date().toISOString();
-    this.save();
-    return structuredClone(record);
+    return this.mutate(() => {
+      const record = this.require(id);
+      // Text can contain user-provided material echoed by a provider. Keep it
+      // in the in-memory controller only; never persist it to the session file.
+      if (event.type !== "text") record.events.push(persistedEvent(event));
+      if (event.type === "activity") record.lastActivity = "Agent reported progress";
+      if (event.type === "file_change") record.changedFiles.push({ path: event.path, kind: event.kind });
+      if (event.type === "error") record.error = "Provider reported an error; inspect the live result for details.";
+      if (event.type === "completed") {
+        record.status = "completed";
+        record.completed = { exitCode: event.exitCode };
+      }
+      record.updatedAt = new Date().toISOString();
+      return structuredClone(record);
+    });
   }
 
   listActiveImplementRuns(workspace: string): RunRecord[] {
+    this.data = this.load();
+    this.reconcileInterruptedRuns();
     return this.data.runs
       .filter((run) => run.workspace === workspace && run.mode === "implement" && ["starting", "running", "waiting_permission"].includes(run.status))
       .map((run) => structuredClone(run));
@@ -99,16 +115,125 @@ export class RunStore {
   private load(): StoreData {
     try {
       const parsed = JSON.parse(readFileSync(this.filePath, "utf8")) as StoreData;
-      return Array.isArray(parsed.runs) ? { runs: parsed.runs } : { runs: [] };
-    } catch {
+      if (!Array.isArray(parsed.runs)) throw new Error("Invalid run store format.");
+      return { runs: parsed.runs.filter(validRunRecord).map(sanitizeRunRecord) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return { runs: [] };
     }
   }
 
-  private save(): void {
+  private mutate<T>(operation: () => T): T {
+    const lock = this.acquireLock();
+    try {
+      this.data = this.load();
+      const result = operation();
+      this.saveUnlocked();
+      return result;
+    } finally {
+      closeSync(lock);
+      unlinkSync(`${this.filePath}.lock`);
+    }
+  }
+
+  private saveUnlocked(): void {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.filePath}.tmp`;
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.data, null, 2), { mode: 0o600 });
     renameSync(temporary, this.filePath);
+  }
+
+  private acquireLock(): number {
+    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+    const lockPath = `${this.filePath}.lock`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const descriptor = openSync(lockPath, "wx", 0o600);
+        writeFileSync(descriptor, String(process.pid));
+        return descriptor;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 1) {
+          throw new Error("Run store is busy; retry the request.");
+        }
+        const owner = Number(readFileSync(lockPath, "utf8"));
+        if (!Number.isInteger(owner) || !isProcessAlive(owner)) unlinkSync(lockPath);
+      }
+    }
+    throw new Error("Run store is busy; retry the request.");
+  }
+
+  private reconcileInterruptedRuns(): void {
+    if (!this.data.runs.some((run) => isActive(run.status) && run.ownerPid !== process.pid && !isProcessAlive(run.ownerPid))) return;
+    this.mutate(() => {
+      markDeadOwnersInterrupted(this.data.runs);
+    });
+  }
+}
+
+function validRunRecord(value: unknown): value is RunRecord {
+  if (!value || typeof value !== "object") return false;
+  const run = value as Partial<RunRecord>;
+  return typeof run.id === "string"
+    && (run.provider === "cursor" || run.provider === "grok")
+    && typeof run.cwd === "string"
+    && typeof run.workspace === "string"
+    && (run.mode === "review" || run.mode === "plan" || run.mode === "implement")
+    && typeof run.ownerPid === "number"
+    && typeof run.status === "string"
+    && Array.isArray(run.changedFiles)
+    && Array.isArray(run.events);
+}
+
+function sanitizeRunRecord(record: RunRecord): RunRecord {
+  return {
+    ...record,
+    changedFiles: record.changedFiles
+      .filter((file) => file && typeof file.path === "string" && ["create", "modify", "delete"].includes(file.kind))
+      .map((file) => ({ path: file.path.slice(0, 4_096), kind: file.kind })),
+    events: record.events
+      .filter((event) => event && typeof event === "object" && event.type !== "text")
+      .map((event) => persistedEvent(event)),
+    error: record.error ? "Provider reported an error; inspect the live result for details." : undefined,
+  };
+}
+
+function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<RunEvent, { type: "text" }> {
+  switch (event.type) {
+    case "started":
+      return { type: "started", provider: event.provider, sessionId: event.sessionId?.slice(0, 512) };
+    case "activity":
+      return { type: "activity", label: "Agent reported progress" };
+    case "permission":
+      return { type: "permission", requestId: event.requestId.slice(0, 128), description: "Agent requires a user decision." };
+    case "file_change":
+      return { type: "file_change", path: event.path.slice(0, 4_096), kind: event.kind };
+    case "error":
+      return { type: "error", message: "Provider reported an error." };
+    case "completed":
+      return { type: "completed", summary: "Provider completed.", exitCode: event.exitCode };
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isActive(status: RunStatus): boolean {
+  return status === "starting" || status === "running" || status === "waiting_permission";
+}
+
+function markDeadOwnersInterrupted(runs: RunRecord[]): void {
+  const now = new Date().toISOString();
+  for (const run of runs) {
+    if (isActive(run.status) && run.ownerPid !== process.pid && !isProcessAlive(run.ownerPid)) {
+      run.status = "interrupted";
+      run.updatedAt = now;
+    }
   }
 }

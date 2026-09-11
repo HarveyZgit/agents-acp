@@ -7,9 +7,9 @@ Use this skill when the user explicitly asks for an independent external-agent p
 
 1. Call `list_external_agent_providers` and report unavailable local executables clearly.
 2. Use `review` or `plan` for read-only questions. These runs may be parallel.
-3. Use `implement` only when the user explicitly asks for changes and pass `allowImplement: true`. It is serialized per workspace.
+3. Use `implement` only when the user explicitly asks for changes, pass `allowImplement: true`, and only after the local operator enabled unsandboxed implementation. It is serialized per workspace.
 4. Send a task prompt only through `start_external_agent`; never put it into a shell command or persist it.
-5. Poll `get_external_agent_status` and surface pending requests. Never auto-approve an ACP permission. Ask the user, then call `respond_external_agent_request` with the user-selected provider response.
+5. Poll `get_external_agent_status` and surface pending requests. Never auto-approve an ACP permission. Standard MCP tool calls cannot prove a human approved it, so leave it pending or use `cancel_external_agent`.
 6. Use `cancel_external_agent` only on request or when the user asks to stop work.
 7. On completion, call `get_external_agent_result`, review changed files, and run relevant project checks before recommending adoption.
 
