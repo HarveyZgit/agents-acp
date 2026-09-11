@@ -1,9 +1,10 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
-export type ProviderName = "cursor" | "grok";
+export type ProviderName = "cursor" | "grok" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
 export type TaskMode = "review" | "plan" | "implement";
+export type PermissionDecision = "allow-once" | "reject-once";
 export type RunEvent =
   | { type: "started"; provider: ProviderName; sessionId?: string }
   | { type: "text"; text: string }
@@ -171,6 +172,10 @@ export abstract class AcpProvider {
   abstract readonly capabilities: ProviderCapabilities;
   abstract command(options: StartOptions): string[];
   abstract authenticationMethod(initialized: Record<string, unknown>): string | undefined;
+
+  permissionResponse(_decision: PermissionDecision): Record<string, unknown> | undefined {
+    return undefined;
+  }
 
   discover(): ProviderAvailability {
     const result = spawnSync(this.executable, ["--version"], {

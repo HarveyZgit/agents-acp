@@ -28,8 +28,12 @@ Policy is enforced before launch:
   serialized per configured workspace.
 - `cwd` must be the configured active workspace or an explicitly authorized
   subtree. Real paths are checked, so symlinks cannot escape the workspace.
-- ACP permissions are never approved automatically. They remain pending and
-  can be cancelled; there is no model-callable approval tool.
+- Read-only and write modes fail closed unless the provider advertises and
+  accepts the corresponding ACP session mode.
+- ACP permissions are never approved automatically. The single-use response
+  tool requires the caller to assert an explicit user decision and should
+  remain approval-prompted in Codex; it is disabled unless
+  `EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1` is configured.
 
 Model selection is intentionally provider-specific. Grok Build's documented
 ACP startup flag supports `--model`; Cursor's documented `agent acp` interface
@@ -84,7 +88,8 @@ npm test
 
 Finally, in Codex, call `list_external_agent_providers`, start a harmless
 `review` or `plan` run, and verify status/result tools and the resource. If a
-permission is requested, confirm it stays pending and cancel the run. Test
+permission is requested, select `allow-once` or `reject-once` yourself and
+call `respond_external_agent_permission` with `userConfirmed: true`. Test
 `implement` only in a disposable workspace after the two explicit opt-ins
 documented in `INSTALL.md`.
 
@@ -93,6 +98,10 @@ documented in `INSTALL.md`.
 The repository tests mock the ACP JSON-RPC lifecycle; they do not install
 Grok Build or Cursor CLI, authenticate either provider, or exercise Codex
 Desktop. Those integrations must be verified on the user's machine.
+
+The bundled fake ACP provider is available only when
+`EXTERNAL_ACP_ENABLE_FAKE=1` is set. It exists solely for the deterministic
+main-flow smoke test; it is not enabled in normal installations.
 
 The prior referenced scratch branch was not readable from this repository's
 remote, so this implementation was created from the design and current public

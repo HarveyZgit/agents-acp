@@ -170,6 +170,7 @@ test("controller leaves permission pending and safely cancels without auto-appro
   );
   const cancelled = await controller.cancel(run.id);
   assert.equal(cancelled.status, "cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(controller.result(run.id).status, "cancelled");
 });
 
@@ -179,5 +180,20 @@ test("controller terminates a provider that completes while permission remains p
   const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
   const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
   await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(controller.status(run.id).status, "failed");
+});
+
+test("controller terminates an ACP run that exceeds its configured lifetime", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider();
+  const controller = new RunController(
+    new RunStore(join(workspace, "runs.json")),
+    new WorkspacePolicy(workspace),
+    [provider],
+    false,
+    5,
+  );
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(controller.status(run.id).status, "failed");
 });

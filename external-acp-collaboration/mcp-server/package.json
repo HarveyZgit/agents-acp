@@ -1,11 +1,12 @@
 {
   "name": "external-acp-collaboration-mcp",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "smoke:main": "node scripts/smoke-main.mjs"
   },
   "engines": {
     "node": ">=22.6.0"

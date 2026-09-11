@@ -2,6 +2,7 @@ import {
   AcpProvider,
   addEnvironmentVariables,
   baseEnvironment,
+  type PermissionDecision,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
@@ -32,5 +33,9 @@ export class CursorProvider extends AcpProvider {
 
   protected environment(): NodeJS.ProcessEnv {
     return addEnvironmentVariables(baseEnvironment(), ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"]);
+  }
+
+  permissionResponse(decision: PermissionDecision): Record<string, unknown> {
+    return { outcome: { outcome: "selected", optionId: decision } };
   }
 }

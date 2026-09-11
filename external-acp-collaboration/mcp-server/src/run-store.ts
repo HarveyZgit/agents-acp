@@ -180,7 +180,7 @@ function validRunRecord(value: unknown): value is RunRecord {
   if (!value || typeof value !== "object") return false;
   const run = value as Partial<RunRecord>;
   return typeof run.id === "string"
-    && (run.provider === "cursor" || run.provider === "grok")
+    && (run.provider === "cursor" || run.provider === "grok" || run.provider === "fake")
     && typeof run.cwd === "string"
     && typeof run.workspace === "string"
     && (run.mode === "review" || run.mode === "plan" || run.mode === "implement")

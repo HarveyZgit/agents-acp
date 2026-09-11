@@ -32,6 +32,10 @@ test("MCP server fails closed for absent workspace configuration and malformed t
     name: "get_external_agent_status",
     arguments: { runId: "x", unexpected: true },
   } })}\n`);
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: {
+    name: "respond_external_agent_permission",
+    arguments: { runId: "x", requestId: "rpc-1", decision: "allow-once", userConfirmed: true },
+  } })}\n`);
   child.stdin.end();
   await new Promise<void>((resolve, reject) => {
     child.on("close", () => resolve());
@@ -42,6 +46,7 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   const configured = responses.find((response) => response.id === 1);
   const malformed = responses.find((response) => response.id === 2);
   const unexpected = responses.find((response) => response.id === 3);
+  const disabledResponse = responses.find((response) => response.id === 4);
   assert.ok(configured, errors.join(""));
   assert.ok(malformed, errors.join(""));
   assert.equal(configured.result.isError, true);
@@ -49,4 +54,6 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   assert.equal(malformed.error.code, -32603);
   assert.equal(unexpected.result.isError, true);
   assert.match(unexpected.result.content[0].text, /Unexpected tool argument/);
+  assert.equal(disabledResponse.result.isError, true);
+  assert.match(disabledResponse.result.content[0].text, /ENABLE_PERMISSION_RESPONSES/);
 });

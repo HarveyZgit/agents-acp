@@ -1,4 +1,4 @@
-# Linux Codex installation — external-acp-collaboration 0.1.2
+# Linux Codex installation — external-acp-collaboration 0.1.5
 
 ## Preconditions
 
@@ -24,6 +24,13 @@ export EXTERNAL_ACP_WORKSPACE="/absolute/path/to/project"
 
 # Optional: restrict launches further to existing paths beneath that workspace.
 export EXTERNAL_ACP_ALLOWED_SUBTREES="/absolute/path/to/project/packages"
+
+# Optional, bounded to 1 minute through 24 hours; default is 2 hours.
+export EXTERNAL_ACP_MAX_RUN_MS=7200000
+
+# Required before any pending ACP permission can receive a response.
+# Keep respond_external_agent_permission approval-prompted in Codex.
+export EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1
 
 # Register the repository as a local Codex marketplace, then verify it.
 codex plugin marketplace add "$PWD"
@@ -55,7 +62,14 @@ grok agent --help
 
 cd external-acp-collaboration/mcp-server
 npm test
+npm run smoke:main
 ```
+
+`smoke:main` launches a fresh MCP server and its bundled fake ACP fixture. It
+requires neither Codex authentication nor Cursor/Grok binaries, and verifies
+provider discovery, start, streamed events, permission waiting, explicit
+single-use response, completion/result, resume, and cancellation. It enables
+the fake provider only in the smoke process.
 
 In Codex, enable the plugin and call:
 
@@ -65,10 +79,17 @@ In Codex, enable the plugin and call:
 3. `get_external_agent_status` while it runs, then
    `get_external_agent_result` after completion
 
-If a provider asks permission, the run remains pending. This is intentional:
-there is no model-callable approval method. Use `cancel_external_agent` to
-stop it. A human-approved permission flow requires a future documented Codex
-plugin UI/callback API.
+If a provider asks permission, the run remains pending. It is never approved
+automatically. After the human selects `allow-once` or `reject-once`, call
+`respond_external_agent_permission` with the run ID, pending request ID,
+chosen decision, and `userConfirmed: true`. Keep this tool in Codex's
+approval-prompted policy; `userConfirmed` records an explicit caller
+assertion but cannot cryptographically prove user presence.
+
+Cursor's documented ACP permission response supports this single-use response.
+Grok's current public ACP documentation does not specify a response payload,
+so the Grok adapter intentionally leaves such requests pending rather than
+guessing or auto-approving.
 
 ## Optional write-mode test
 
@@ -88,8 +109,8 @@ workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/external-acp-collaboration-0.1.2.zip` and
-`dist/external-acp-collaboration-0.1.2.tar.gz` are portable copies of the
+`dist/external-acp-collaboration-0.1.5.zip` and
+`dist/external-acp-collaboration-0.1.5.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -97,9 +118,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/external-acp-collaboration-0.1.2.tar.gz
-tar -C . -czf dist/external-acp-collaboration-0.1.2.tar.gz external-acp-collaboration
-rm -f dist/external-acp-collaboration-0.1.2.zip
-zip -qr dist/external-acp-collaboration-0.1.2.zip external-acp-collaboration
-sha256sum dist/external-acp-collaboration-0.1.2.{tar.gz,zip}
+rm -f dist/external-acp-collaboration-0.1.5.tar.gz
+tar -C . -czf dist/external-acp-collaboration-0.1.5.tar.gz external-acp-collaboration
+rm -f dist/external-acp-collaboration-0.1.5.zip
+zip -qr dist/external-acp-collaboration-0.1.5.zip external-acp-collaboration
+sha256sum dist/external-acp-collaboration-0.1.5.{tar.gz,zip}
 ```

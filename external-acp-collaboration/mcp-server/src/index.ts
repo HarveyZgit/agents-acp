@@ -16,8 +16,12 @@ const configurationError = workspace
 const controller = new RunController(
   store,
   new WorkspacePolicy(workspace ?? process.cwd(), authorizedSubtrees, process.env.EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT === "1"),
+  undefined,
+  process.env.EXTERNAL_ACP_ENABLE_FAKE === "1",
+  positiveIntegerEnvironment("EXTERNAL_ACP_MAX_RUN_MS", 7_200_000, 60_000, 86_400_000),
 );
 let initialized = false;
+const permissionResponsesEnabled = process.env.EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES === "1";
 
 const tools = [
   tool("list_external_agent_providers", "Discover locally installed ACP providers and their documented capabilities.", { type: "object", properties: {} }),
@@ -25,7 +29,7 @@ const tools = [
     type: "object",
     required: ["provider", "cwd", "prompt", "mode"],
     properties: {
-      provider: { type: "string", enum: ["cursor", "grok"] },
+      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
       cwd: { type: "string" },
       prompt: { type: "string", description: "Sent only to the provider process and never persisted." },
       mode: { type: "string", enum: ["review", "plan", "implement"] },
@@ -47,6 +51,16 @@ const tools = [
     },
   }),
   tool("get_external_agent_result", "Return final in-memory text, changed-file summary, errors, and verification advice.", schema(["runId"])),
+  tool("respond_external_agent_permission", "Submit a user-confirmed, single-use response to a pending ACP permission. Keep this tool approval-prompted in Codex.", {
+    type: "object",
+    required: ["runId", "requestId", "decision", "userConfirmed"],
+    properties: {
+      runId: { type: "string" },
+      requestId: { type: "string" },
+      decision: { type: "string", enum: ["allow-once", "reject-once"] },
+      userConfirmed: { type: "boolean", description: "Must be true only after the human user selected the decision." },
+    },
+  }),
 ];
 
 const input = readline.createInterface({ input: process.stdin });
@@ -81,8 +95,8 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "external-acp-collaboration", version: "0.1.2" },
-        instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending and cannot be auto-approved through this server.",
+        serverInfo: { name: "external-acp-collaboration", version: "0.1.5" },
+        instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending until an approval-prompted, user-confirmed response tool call.",
       };
     case "ping":
       return {};
@@ -129,7 +143,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
         onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
         requireWorkspaceConfiguration();
         result = controller.start({
-          provider: stringEnum(args.provider, ["cursor", "grok"]),
+          provider: stringEnum(args.provider, ["cursor", "grok", "fake"]),
           cwd: requiredString(args.cwd, "cwd", 4_096, true),
           prompt: requiredString(args.prompt, "prompt", 65_536),
           mode: stringEnum(args.mode, ["review", "plan", "implement"]),
@@ -150,7 +164,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
         requireWorkspaceConfiguration();
         result = controller.resume({
           runId: optionalString(args.runId, "runId", 128),
-          provider: args.provider === undefined ? undefined : stringEnum(args.provider, ["cursor", "grok"]),
+          provider: args.provider === undefined ? undefined : stringEnum(args.provider, ["cursor", "grok", "fake"]),
           sessionId: optionalString(args.sessionId, "sessionId", 512),
           followUp: requiredString(args.followUp, "followUp", 65_536),
           allowImplement: args.allowImplement === true,
@@ -159,6 +173,18 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
       case "get_external_agent_result":
         onlyKeys(args, ["runId"]);
         result = controller.result(requiredString(args.runId, "runId", 128));
+        break;
+      case "respond_external_agent_permission":
+        onlyKeys(args, ["runId", "requestId", "decision", "userConfirmed"]);
+        if (!permissionResponsesEnabled) {
+          throw new Error("Permission responses are disabled until EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1 is explicitly configured.");
+        }
+        if (args.userConfirmed !== true) throw new Error("A permission response requires explicit userConfirmed: true.");
+        result = controller.respondPermission(
+          requiredString(args.runId, "runId", 128),
+          requiredString(args.requestId, "requestId", 128),
+          stringEnum(args.decision, ["allow-once", "reject-once"]),
+        );
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -217,6 +243,13 @@ function optionalString(value: unknown, name: string, maximumLength: number): st
 
 function requireWorkspaceConfiguration(): void {
   if (configurationError) throw new Error(configurationError);
+}
+
+function positiveIntegerEnvironment(name: string, fallback: number, minimum: number, maximum: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }
 
 function stringEnum<T extends string>(value: unknown, values: readonly T[]): T {

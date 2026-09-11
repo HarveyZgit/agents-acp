@@ -1,11 +1,14 @@
 import { CursorProvider } from "./acp/cursor.ts";
+import { FakeProvider } from "./acp/fake.ts";
 import { GrokProvider } from "./acp/grok.ts";
 import path from "node:path";
 import {
   AcpProvider,
   JsonRpcPeer,
   normalizeAcpEvent,
+  type PermissionDecision,
   type ProviderName,
+  type RpcMessage,
   type RunEvent,
   type TaskMode,
 } from "./acp/provider.ts";
@@ -28,21 +31,34 @@ type RuntimeRun = {
   mode: TaskMode;
   workspace: string;
   events: RunEvent[];
-  pendingRequests: Set<string>;
+  pendingRequests: Map<string, RpcMessage>;
   resultText: string;
   error?: string;
+  timeout?: NodeJS.Timeout;
 };
 
 export class RunController {
   private readonly store: RunStore;
   private readonly policy: WorkspacePolicy;
   private readonly providers: Map<ProviderName, AcpProvider>;
+  private readonly maxRunMs: number;
   private readonly runtime = new Map<string, RuntimeRun>();
 
-  constructor(store: RunStore, policy: WorkspacePolicy, providers?: AcpProvider[]) {
+  constructor(
+    store: RunStore,
+    policy: WorkspacePolicy,
+    providers?: AcpProvider[],
+    enableFake = false,
+    maxRunMs = 7_200_000,
+  ) {
     this.store = store;
     this.policy = policy;
-    this.providers = new Map((providers ?? [new CursorProvider(), new GrokProvider()]).map((provider) => [provider.name, provider]));
+    this.maxRunMs = maxRunMs;
+    this.providers = new Map((providers ?? [
+      new CursorProvider(),
+      new GrokProvider(),
+      ...(enableFake ? [new FakeProvider()] : []),
+    ]).map((provider) => [provider.name, provider]));
   }
 
   listProviders(): ReturnType<AcpProvider["discover"]>[] {
@@ -75,7 +91,7 @@ export class RunController {
         mode: request.mode,
         workspace: decision.workspace,
         events: [],
-        pendingRequests: new Set(),
+        pendingRequests: new Map(),
         resultText: "",
       };
       const peer = new JsonRpcPeer(
@@ -85,6 +101,12 @@ export class RunController {
       );
       runtime.peer = peer;
       this.runtime.set(current.id, runtime);
+      runtime.timeout = setTimeout(() => {
+        if (this.isActive(current.id)) {
+          this.fail(current.id, new Error("ACP run exceeded its configured maximum duration."));
+          runtime.peer.terminate();
+        }
+      }, this.maxRunMs);
       transport.onExit((code) => this.handleExit(current.id, code));
       void this.initialize(current.id, request);
       return current;
@@ -102,7 +124,7 @@ export class RunController {
       ...record,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
-      pendingRequests: [...(runtime?.pendingRequests ?? [])],
+      pendingRequests: [...(runtime?.pendingRequests.keys() ?? [])],
     };
   }
 
@@ -134,6 +156,7 @@ export class RunController {
       // cannot rewrite a cancelled run as failed.
       const cancelled = this.store.update(id, { status: "cancelled" });
       this.policy.release(runtime.workspace, runtime.mode);
+      this.clearTimeout(runtime);
       runtime.peer.terminate();
       return cancelled;
     }
@@ -160,13 +183,31 @@ export class RunController {
     });
   }
 
+  respondPermission(id: string, requestId: string, decision: PermissionDecision): RunRecord {
+    const record = this.store.get(id);
+    if (isTerminal(record.status)) throw new Error("Cannot respond to a terminal run.");
+    const runtime = this.requireRuntime(id);
+    const request = runtime.pendingRequests.get(requestId);
+    if (!request || request.method !== "session/request_permission" || request.id === undefined) {
+      throw new Error("No pending ACP permission request with that ID.");
+    }
+    const response = runtime.provider.permissionResponse(decision);
+    if (!response) throw new Error(`Explicit ACP permission responses are not documented for ${runtime.provider.name}.`);
+    // Remove the gate before replying: a fast provider can synchronously
+    // complete its prompt as soon as it receives this JSON-RPC response.
+    runtime.pendingRequests.delete(requestId);
+    this.store.update(id, { status: "running" });
+    runtime.peer.respond(request.id, response);
+    return this.store.get(id);
+  }
+
   private async initialize(id: string, request: StartRequest): Promise<void> {
     const runtime = this.requireRuntime(id);
     try {
       const initialized = await runtime.peer.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "external-acp-collaboration", version: "0.1.0" },
+        clientInfo: { name: "external-acp-collaboration", version: "0.1.5" },
       });
       if (!this.isActive(id)) return;
       const authMethod = runtime.provider.authenticationMethod(initialized);
@@ -197,6 +238,9 @@ export class RunController {
         summary: "Provider completed.",
       });
       this.policy.release(runtime.workspace, runtime.mode);
+      this.clearTimeout(runtime);
+      runtime.peer.terminate();
+      this.pruneRuntime();
     } catch (error) {
       this.fail(id, error);
       runtime.peer.terminate();
@@ -239,7 +283,7 @@ export class RunController {
     for (const event of normalizeAcpEvent(runtime.provider.name, message)) this.acceptEvent(id, event);
     if (isRequest && message.id !== undefined && requiresUserDecision(message.method)) {
       const requestId = `rpc-${message.id}`;
-      runtime.pendingRequests.add(requestId);
+      runtime.pendingRequests.set(requestId, message);
       this.store.update(id, { status: "waiting_permission" });
     } else if (isRequest && message.id !== undefined) {
       runtime.peer.respondError(message.id, -32601, "This ACP client does not support that request.");
@@ -274,6 +318,7 @@ export class RunController {
     if (runtime) {
       runtime.error = "Provider error; inspect the provider's local diagnostics.";
       this.policy.release(runtime.workspace, runtime.mode);
+      this.clearTimeout(runtime);
     }
     this.store.update(id, { status: "failed" });
     this.store.appendEvent(id, { type: "error", message: "Provider failure; inspect the live result for details." });
@@ -287,6 +332,20 @@ export class RunController {
 
   private isActive(id: string): boolean {
     return !isTerminal(this.store.get(id).status);
+  }
+
+  private pruneRuntime(): void {
+    const terminal = [...this.runtime.entries()]
+      .filter(([id]) => isTerminal(this.store.get(id).status));
+    while (this.runtime.size > 200 && terminal.length > 0) {
+      const [id] = terminal.shift() as [string, RuntimeRun];
+      this.runtime.delete(id);
+    }
+  }
+
+  private clearTimeout(runtime: RuntimeRun): void {
+    if (runtime.timeout) clearTimeout(runtime.timeout);
+    runtime.timeout = undefined;
   }
 }
 
