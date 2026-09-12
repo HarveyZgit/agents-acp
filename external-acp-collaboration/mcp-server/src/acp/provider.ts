@@ -5,6 +5,10 @@ export type ProviderName = "cursor" | "grok" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
 export type TaskMode = "review" | "plan" | "implement";
 export type PermissionDecision = "allow-once" | "reject-once";
+export type AuthMethod = {
+  methodId: string;
+  type?: string;
+};
 export type RunEvent =
   | { type: "started"; provider: ProviderName; sessionId?: string }
   | { type: "text"; text: string }
@@ -207,7 +211,15 @@ export abstract class AcpProvider {
   abstract readonly executable: string;
   abstract readonly capabilities: ProviderCapabilities;
   abstract command(options: StartOptions): string[];
-  abstract authenticationMethod(initialized: Record<string, unknown>): string | undefined;
+  abstract authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined;
+
+  prefersSessionBeforeAuthentication(): boolean {
+    return false;
+  }
+
+  allowsPreauthenticatedSessionFallback(): boolean {
+    return false;
+  }
 
   permissionResponse(_decision: PermissionDecision): Record<string, unknown> | undefined {
     return undefined;

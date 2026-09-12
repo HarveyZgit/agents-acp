@@ -130,6 +130,18 @@ test("Cursor discovery reports cursor-agent clearly when its ACP entry is unusab
   );
 });
 
+test("Cursor authentication accepts methodId and never authenticates terminal methods", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({}));
+  assert.deepEqual(
+    provider.authenticationMethod({ authMethods: [{ methodId: "cursor_login" }] }),
+    { methodId: "cursor_login", type: undefined },
+  );
+  assert.deepEqual(
+    provider.authenticationMethod({ authMethods: [{ id: "cursor_login", type: "terminal" }] }),
+    { methodId: "cursor_login", type: "terminal" },
+  );
+});
+
 test("provider environment is allowlisted and does not inherit unrelated secrets", () => {
   const previous = process.env.UNRELATED_TEST_SECRET;
   process.env.UNRELATED_TEST_SECRET = "do-not-forward";
@@ -155,25 +167,40 @@ class MockProvider extends AcpProvider {
   private readonly withoutModes: boolean;
   private readonly rejectedMethod?: string;
   private readonly rejectionMessage?: string;
+  private readonly sessionFirstFails: boolean;
+  private readonly authenticationInvalidParams: boolean;
+  private readonly authMethods: unknown[];
+  private sessionAttempts = 0;
 
   constructor(options: {
     completeBeforePermission?: boolean;
     withoutModes?: boolean;
     rejectedMethod?: string;
     rejectionMessage?: string;
+    sessionFirstFails?: boolean;
+    authenticationInvalidParams?: boolean;
+    authMethods?: unknown[];
   } = {}) {
     super();
     this.completeBeforePermission = options.completeBeforePermission ?? false;
     this.withoutModes = options.withoutModes ?? false;
     this.rejectedMethod = options.rejectedMethod;
     this.rejectionMessage = options.rejectionMessage;
+    this.sessionFirstFails = options.sessionFirstFails ?? false;
+    this.authenticationInvalidParams = options.authenticationInvalidParams ?? false;
+    this.authMethods = options.authMethods ?? [{ id: "cached_token" }];
   }
 
   command(_options: StartOptions): string[] {
     return ["agent", "stdio"];
   }
-  authenticationMethod(): string | undefined {
-    return "cached_token";
+  authenticationMethod(initialized: Record<string, unknown>) {
+    return Array.isArray(initialized.authMethods)
+      && initialized.authMethods.some((method) => (
+        typeof method === "object" && method !== null && (method as { id?: string }).id === "cached_token"
+      ))
+      ? { methodId: "cached_token" }
+      : undefined;
   }
   createTransport(): LineTransport {
     const originalWrite = this.transport.write.bind(this.transport);
@@ -188,7 +215,7 @@ class MockProvider extends AcpProvider {
         return;
       }
       const results: Record<string, unknown> = {
-        initialize: { authMethods: [{ id: "cached_token" }] },
+        initialize: { authMethods: this.authMethods },
         authenticate: {},
         "session/new": this.withoutModes ? { sessionId: "mock-session" } : {
           sessionId: "mock-session",
@@ -202,6 +229,14 @@ class MockProvider extends AcpProvider {
       };
       if (message.method === this.rejectedMethod) {
         this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.rejectionMessage } });
+        return;
+      }
+      if (message.method === "session/new" && this.sessionFirstFails && this.sessionAttempts++ === 0) {
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "authentication required" } });
+        return;
+      }
+      if (message.method === "authenticate" && this.authenticationInvalidParams) {
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "Invalid params" } });
         return;
       }
       if (message.method === "session/prompt") {
@@ -243,6 +278,60 @@ test("controller leaves permission pending and safely cancels without auto-appro
   assert.equal(controller.result(run.id).status, "cancelled");
 });
 
+test("controller skips authenticate when no agent auth method is selected", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider({ authMethods: [] });
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(controller.status(run.id).status, "waiting_permission");
+  assert.equal(provider.transport.writes.some((line) => JSON.parse(line).method === "authenticate"), false);
+  await controller.cancel(run.id);
+});
+
+test("controller does not authenticate terminal auth methods", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  class TerminalAuthProvider extends MockProvider {
+    authenticationMethod() {
+      return { methodId: "open_browser", type: "terminal" };
+    }
+  }
+  const provider = new TerminalAuthProvider();
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(controller.status(run.id).status, "waiting_permission");
+  assert.equal(provider.transport.writes.some((line) => JSON.parse(line).method === "authenticate"), false);
+  await controller.cancel(run.id);
+});
+
+test("pre-authenticated Cursor fallback retries session after authenticate invalid params", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  class PreauthenticatedCursorProvider extends MockProvider {
+    prefersSessionBeforeAuthentication(): boolean {
+      return true;
+    }
+    allowsPreauthenticatedSessionFallback(): boolean {
+      return true;
+    }
+    authenticationMethod() {
+      return { methodId: "cursor_login" };
+    }
+  }
+  const provider = new PreauthenticatedCursorProvider({
+    sessionFirstFails: true,
+    authenticationInvalidParams: true,
+  });
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const status = controller.status(run.id);
+  assert.equal(status.status, "waiting_permission");
+  assert.equal(provider.transport.writes.filter((line) => JSON.parse(line).method === "session/new").length, 2);
+  assert.equal(provider.transport.writes.filter((line) => JSON.parse(line).method === "authenticate").length, 1);
+  await controller.cancel(run.id);
+});
+
 test("controller terminates a provider that completes while permission remains pending", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
   const provider = new MockProvider({ completeBeforePermission: true });
@@ -282,6 +371,21 @@ test("failure status and result retain sanitized ACP stage diagnostics", async (
   assert.equal(String(result.error).includes("super-secret"), false);
   assert.equal(String(result.error).includes("sensitive request"), false);
   assert.equal(String(result.error).includes("/outside/private/path"), false);
+});
+
+test("authenticate failures include only safe advertised auth method summaries", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider({
+    rejectedMethod: "authenticate",
+    rejectionMessage: "authorization=hidden-value",
+  });
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const error = String(controller.result(run.id).error);
+  assert.match(error, /ACP authenticate was rejected/);
+  assert.match(error, /Advertised auth methods: cached_token/);
+  assert.equal(error.includes("hidden-value"), false);
 });
 
 test("controller terminates an ACP run that exceeds its configured lifetime", async () => {

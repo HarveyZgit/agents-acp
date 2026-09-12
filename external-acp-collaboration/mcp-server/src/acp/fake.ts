@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import {
   AcpProvider,
   type PermissionDecision,
+  type AuthMethod,
   type ProviderAvailability,
   type ProviderCapabilities,
   type ProviderName,
@@ -37,11 +38,11 @@ export class FakeProvider extends AcpProvider {
     };
   }
 
-  authenticationMethod(initialized: Record<string, unknown>): string | undefined {
+  authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
     const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
     return methods.some((method) => (
       typeof method === "object" && method !== null && (method as { id?: string }).id === "fake_local"
-    )) ? "fake_local" : undefined;
+    )) ? { methodId: "fake_local" } : undefined;
   }
 
   permissionResponse(decision: PermissionDecision): Record<string, unknown> {

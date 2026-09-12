@@ -3,6 +3,7 @@ import {
   addEnvironmentVariables,
   baseEnvironment,
   type PermissionDecision,
+  type AuthMethod,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
@@ -96,11 +97,27 @@ export class CursorProvider extends AcpProvider {
     return [...resolved.args];
   }
 
-  authenticationMethod(initialized: Record<string, unknown>): string | undefined {
+  authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
     const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
-    return methods.some((method) => (
-      typeof method === "object" && method !== null && (method as { id?: string }).id === "cursor_login"
-    )) ? "cursor_login" : undefined;
+    for (const method of methods) {
+      if (!method || typeof method !== "object") continue;
+      const descriptor = method as { id?: unknown; methodId?: unknown; type?: unknown };
+      const methodId = typeof descriptor.methodId === "string"
+        ? descriptor.methodId
+        : typeof descriptor.id === "string" ? descriptor.id : undefined;
+      if (methodId === "cursor_login") {
+        return { methodId, type: typeof descriptor.type === "string" ? descriptor.type : undefined };
+      }
+    }
+    return undefined;
+  }
+
+  prefersSessionBeforeAuthentication(): boolean {
+    return true;
+  }
+
+  allowsPreauthenticatedSessionFallback(): boolean {
+    return true;
   }
 
   protected environment(): NodeJS.ProcessEnv {

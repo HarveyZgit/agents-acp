@@ -38,6 +38,7 @@ type RuntimeRun = {
   resultText: string;
   prompt?: string;
   error?: string;
+  authMethodsSummary?: string;
   stage: LifecycleStage;
   timeout?: NodeJS.Timeout;
 };
@@ -133,6 +134,7 @@ export class RunController {
       ...record,
       error: runtime?.error ?? record.error,
       stage: runtime?.stage,
+      authMethods: runtime?.authMethodsSummary,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
       pendingRequests: [...(runtime?.pendingRequests.keys() ?? [])],
@@ -221,18 +223,46 @@ export class RunController {
       const initialized = await runtime.peer.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "agents-acp", version: "0.1.9" },
+        clientInfo: { name: "agents-acp", version: "0.1.10" },
       });
       if (!this.isActive(id)) return;
+      runtime.authMethodsSummary = summarizeAuthMethods(initialized);
       const authMethod = runtime.provider.authenticationMethod(initialized);
-      if (!authMethod) throw new Error(`No supported local authentication method was advertised by ${request.provider}.`);
-      runtime.stage = "authenticate";
-      await runtime.peer.request("authenticate", { methodId: authMethod });
-      if (!this.isActive(id)) return;
-      runtime.stage = request.sessionId ? "session/load" : "session/new";
-      const session = request.sessionId
-        ? await runtime.peer.request("session/load", { sessionId: request.sessionId, cwd: request.cwd })
-        : await runtime.peer.request("session/new", { cwd: request.cwd, mcpServers: [] });
+      let session: Record<string, unknown>;
+      if (runtime.provider.prefersSessionBeforeAuthentication()) {
+        try {
+          session = await this.createSession(runtime, request);
+        } catch (sessionError) {
+          if (!shouldAuthenticate(authMethod)) throw sessionError;
+          this.acceptEvent(id, {
+            type: "activity",
+            label: "ACP session creation requested authentication; trying the advertised protocol method.",
+          });
+          try {
+            await this.authenticate(id, runtime, authMethod);
+          } catch (authError) {
+            if (!runtime.provider.allowsPreauthenticatedSessionFallback() || !isInvalidParams(authError)) throw authError;
+            this.acceptEvent(id, {
+              type: "activity",
+              label: "ACP authenticate returned invalid parameters; retrying the pre-authenticated session.",
+            });
+          }
+          session = await this.createSession(runtime, request);
+        }
+      } else {
+        if (shouldAuthenticate(authMethod)) {
+          try {
+            await this.authenticate(id, runtime, authMethod);
+          } catch (authError) {
+            if (!runtime.provider.allowsPreauthenticatedSessionFallback() || !isInvalidParams(authError)) throw authError;
+            this.acceptEvent(id, {
+              type: "activity",
+              label: "ACP authenticate returned invalid parameters; retrying the pre-authenticated session.",
+            });
+          }
+        }
+        session = await this.createSession(runtime, request);
+      }
       const sessionId = String(session.sessionId ?? "");
       if (!sessionId) throw new Error("ACP provider did not return a session ID.");
       if (!this.isActive(id)) return;
@@ -272,6 +302,19 @@ export class RunController {
       this.fail(id, error);
       runtime.peer.terminate();
     }
+  }
+
+  private async authenticate(id: string, runtime: RuntimeRun, method: { methodId: string }): Promise<void> {
+    runtime.stage = "authenticate";
+    await runtime.peer.request("authenticate", { methodId: method.methodId });
+    if (!this.isActive(id)) throw new Error("Run was cancelled during authentication.");
+  }
+
+  private async createSession(runtime: RuntimeRun, request: StartRequest): Promise<Record<string, unknown>> {
+    runtime.stage = request.sessionId ? "session/load" : "session/new";
+    return request.sessionId
+      ? runtime.peer.request("session/load", { sessionId: request.sessionId, cwd: request.cwd })
+      : runtime.peer.request("session/new", { cwd: request.cwd, mcpServers: [] });
   }
 
   private async setModeIfAdvertised(
@@ -329,7 +372,13 @@ export class RunController {
     if (runtime.events.length > 500) runtime.events.splice(0, runtime.events.length - 500);
     if (safeEvent.type === "text") runtime.resultText = `${runtime.resultText}${safeEvent.text}`.slice(-1_000_000);
     if (safeEvent.type === "error") {
-      const diagnostic = describeFailure(runtime.stage, new Error(safeEvent.message), runtime.workspace, runtime.prompt);
+      const diagnostic = describeFailure(
+        runtime.stage,
+        new Error(safeEvent.message),
+        runtime.workspace,
+        runtime.prompt,
+        runtime.authMethodsSummary,
+      );
       runtime.error = diagnostic;
       safeEvent.message = diagnostic;
     }
@@ -348,7 +397,13 @@ export class RunController {
     const record = this.store.get(id);
     if (isTerminal(record.status)) return;
     const runtime = this.runtime.get(id);
-    const diagnostic = describeFailure(runtime?.stage ?? fallbackStage, error, runtime?.workspace, runtime?.prompt);
+    const diagnostic = describeFailure(
+      runtime?.stage ?? fallbackStage,
+      error,
+      runtime?.workspace,
+      runtime?.prompt,
+      runtime?.authMethodsSummary,
+    );
     if (runtime) {
       runtime.error = diagnostic;
       runtime.prompt = undefined;
@@ -394,6 +449,31 @@ function requiresUserDecision(method: string | undefined): boolean {
     || method === "cursor/create_plan";
 }
 
+function shouldAuthenticate(method: { methodId: string; type?: string } | undefined): boolean {
+  return method !== undefined && method.type?.toLowerCase() !== "terminal";
+}
+
+function isInvalidParams(error: unknown): boolean {
+  return error instanceof AcpRpcError && error.code === -32602;
+}
+
+function summarizeAuthMethods(initialized: Record<string, unknown>): string | undefined {
+  const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
+  const summary = methods.flatMap((method) => {
+    if (!method || typeof method !== "object") return [];
+    const descriptor = method as { id?: unknown; methodId?: unknown; type?: unknown };
+    const id = typeof descriptor.methodId === "string"
+      ? descriptor.methodId
+      : typeof descriptor.id === "string" ? descriptor.id : undefined;
+    if (!id || !/^[A-Za-z0-9._-]{1,64}$/.test(id)) return [];
+    const type = typeof descriptor.type === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(descriptor.type)
+      ? `:${descriptor.type}`
+      : "";
+    return [`${id}${type}`];
+  });
+  return summary.length > 0 ? summary.join(", ") : undefined;
+}
+
 function sanitizeEvent(event: RunEvent, workspace: string): RunEvent | undefined {
   if (event.type !== "file_change") return event;
   if (event.path.includes("\0")) return undefined;
@@ -408,21 +488,28 @@ function describeFailure(
   error: unknown,
   workspace?: string,
   prompt?: string,
+  authMethodsSummary?: string,
 ): string {
-  if (error instanceof AcpTimeoutError) return `ACP ${stage} timed out.`;
+  if (error instanceof AcpTimeoutError) return withAuthSummary(`ACP ${stage} timed out.`, stage, authMethodsSummary);
   if (error instanceof AcpProcessExitError) {
-    if (error.errorCode) return `ACP ${stage} failed: provider process error ${error.errorCode}.`;
-    return `ACP ${stage} failed: provider process exited (${error.exitCode ?? "signal"}).`;
+    if (error.errorCode) return withAuthSummary(`ACP ${stage} failed: provider process error ${error.errorCode}.`, stage, authMethodsSummary);
+    return withAuthSummary(`ACP ${stage} failed: provider process exited (${error.exitCode ?? "signal"}).`, stage, authMethodsSummary);
   }
   if (error instanceof AcpRpcError) {
     const code = error.code === undefined ? "unknown" : String(error.code);
     const detail = error.providerMessage
       ? ` ${sanitizeDiagnosticText(error.providerMessage, workspace, prompt)}`
       : "";
-    return `ACP ${stage} was rejected by the provider (JSON-RPC code ${code}).${detail}`.slice(0, 500);
+    return withAuthSummary(`ACP ${stage} was rejected by the provider (JSON-RPC code ${code}).${detail}`.slice(0, 500), stage, authMethodsSummary);
   }
   const message = error instanceof Error ? error.message : "Unexpected internal adapter error.";
-  return `ACP ${stage} failed: ${sanitizeDiagnosticText(message, workspace, prompt)}`.slice(0, 500);
+  return withAuthSummary(`ACP ${stage} failed: ${sanitizeDiagnosticText(message, workspace, prompt)}`.slice(0, 500), stage, authMethodsSummary);
+}
+
+function withAuthSummary(message: string, stage: LifecycleStage, summary?: string): string {
+  return stage === "authenticate" && summary
+    ? `${message} Advertised auth methods: ${summary}.`.slice(0, 500)
+    : message;
 }
 
 function sanitizeDiagnosticText(value: string, workspace?: string, prompt?: string): string {

@@ -43,8 +43,10 @@ does not document a model parameter, so the Cursor adapter rejects `model`
 instead of adding it to task text.
 
 Cursor ACP follows the documented lifecycle: `initialize`, `authenticate` with
-`cursor_login` when advertised, `session/new` (or `session/load`), then
-`session/prompt`. `review` requests Cursor's `ask` mode, `plan` requests
+`cursor_login` when required, `session/new` (or `session/load`), then
+`session/prompt`. Because `cursor-agent` commonly uses its existing local
+login, agents-acp first attempts session creation and only uses a non-terminal
+advertised `cursor_login` method when session creation requires it. `review` requests Cursor's `ask` mode, `plan` requests
 `plan`, and `implement` requests `agent`. If a read-only mode is not
 advertised, the run continues using the provider default and records that
 activity; `implement` still fails without an advertised `agent` mode.
@@ -86,6 +88,11 @@ The Cursor provider probes only `cursor-agent --version` and
 `cursor-agent acp --help`, then records `cursor-agent acp` in
 `list_providers`. That resolved command is reused for start and
 resume, preventing a fallback to a conflicting `cursor` or `agent` binary.
+
+Failures surface a bounded, sanitized `error` plus its lifecycle `stage` in
+both `status` and `result`. JSON-RPC error codes, process error/exit codes,
+and advertised authentication method IDs/types are retained; prompt text,
+token-like values, and paths outside the workspace are redacted.
 
 Confirm existing provider authentication using each provider's documented local
 status/login help without exposing tokens. Cursor ACP uses the advertised

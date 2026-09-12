@@ -1,4 +1,4 @@
-# Linux Codex installation — agents-acp 0.1.9
+# Linux Codex installation — agents-acp 0.1.10
 
 ## Preconditions
 
@@ -71,6 +71,12 @@ The Cursor adapter uses only `cursor-agent acp`. It checks
 prefix, which start and resume reuse. It intentionally never falls back to
 `cursor` or `agent`, which may conflict with unrelated local tools.
 
+When `cursor-agent status` already reports a logged-in user, agents-acp tries
+`session/new` before protocol authentication. It only calls `authenticate`
+for an advertised non-terminal method when session creation requires it.
+Terminal auth methods and an omitted `authMethods` list are never sent to
+`authenticate`.
+
 `smoke:main` launches a fresh MCP server and its bundled fake ACP fixture. It
 requires neither Codex authentication nor Cursor/Grok binaries, and verifies
 provider discovery, start, streamed events, permission waiting, explicit
@@ -115,8 +121,8 @@ workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/agents-acp-0.1.9.zip` and
-`dist/agents-acp-0.1.9.tar.gz` are portable copies of the
+`dist/agents-acp-0.1.10.zip` and
+`dist/agents-acp-0.1.10.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -124,9 +130,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.1.9.tar.gz
-tar -C . -czf dist/agents-acp-0.1.9.tar.gz external-acp-collaboration
-rm -f dist/agents-acp-0.1.9.zip
-zip -qr dist/agents-acp-0.1.9.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.1.9.{tar.gz,zip}
+rm -f dist/agents-acp-0.1.10.tar.gz
+tar -C . -czf dist/agents-acp-0.1.10.tar.gz external-acp-collaboration
+rm -f dist/agents-acp-0.1.10.zip
+zip -qr dist/agents-acp-0.1.10.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.1.10.{tar.gz,zip}
 ```
