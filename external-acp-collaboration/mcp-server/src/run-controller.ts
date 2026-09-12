@@ -3,7 +3,10 @@ import { FakeProvider } from "./acp/fake.ts";
 import { GrokProvider } from "./acp/grok.ts";
 import path from "node:path";
 import {
+  AcpProcessExitError,
   AcpProvider,
+  AcpRpcError,
+  AcpTimeoutError,
   JsonRpcPeer,
   normalizeAcpEvent,
   type PermissionDecision,
@@ -33,9 +36,13 @@ type RuntimeRun = {
   events: RunEvent[];
   pendingRequests: Map<string, RpcMessage>;
   resultText: string;
+  prompt?: string;
   error?: string;
+  stage: LifecycleStage;
   timeout?: NodeJS.Timeout;
 };
+
+type LifecycleStage = "spawn" | "initialize" | "authenticate" | "session/new" | "session/load" | "mode" | "session/prompt" | "cancel";
 
 export class RunController {
   private readonly store: RunStore;
@@ -93,6 +100,8 @@ export class RunController {
         events: [],
         pendingRequests: new Map(),
         resultText: "",
+        prompt: request.prompt,
+        stage: "spawn",
       };
       const peer = new JsonRpcPeer(
         transport,
@@ -107,7 +116,7 @@ export class RunController {
           runtime.peer.terminate();
         }
       }, this.maxRunMs);
-      transport.onExit((code) => this.handleExit(current.id, code));
+      transport.onExit((code, errorCode) => this.handleExit(current.id, code, errorCode));
       void this.initialize(current.id, request);
       return current;
     } catch (error) {
@@ -122,6 +131,8 @@ export class RunController {
     const runtime = this.runtime.get(id);
     return {
       ...record,
+      error: runtime?.error ?? record.error,
+      stage: runtime?.stage,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
       pendingRequests: [...(runtime?.pendingRequests.keys() ?? [])],
@@ -149,6 +160,7 @@ export class RunController {
     if (isTerminal(record.status)) return record;
     try {
       if (record.sessionId) {
+        runtime.stage = "cancel";
         await runtime.peer.request("session/cancel", { sessionId: record.sessionId }, 5_000);
       }
     } finally {
@@ -156,6 +168,7 @@ export class RunController {
       // cannot rewrite a cancelled run as failed.
       const cancelled = this.store.update(id, { status: "cancelled" });
       this.policy.release(runtime.workspace, runtime.mode);
+      runtime.prompt = undefined;
       this.clearTimeout(runtime);
       runtime.peer.terminate();
       return cancelled;
@@ -204,16 +217,19 @@ export class RunController {
   private async initialize(id: string, request: StartRequest): Promise<void> {
     const runtime = this.requireRuntime(id);
     try {
+      runtime.stage = "initialize";
       const initialized = await runtime.peer.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "external-acp-collaboration", version: "0.1.6" },
+        clientInfo: { name: "external-acp-collaboration", version: "0.1.8" },
       });
       if (!this.isActive(id)) return;
       const authMethod = runtime.provider.authenticationMethod(initialized);
       if (!authMethod) throw new Error(`No supported local authentication method was advertised by ${request.provider}.`);
+      runtime.stage = "authenticate";
       await runtime.peer.request("authenticate", { methodId: authMethod });
       if (!this.isActive(id)) return;
+      runtime.stage = request.sessionId ? "session/load" : "session/new";
       const session = request.sessionId
         ? await runtime.peer.request("session/load", { sessionId: request.sessionId, cwd: request.cwd })
         : await runtime.peer.request("session/new", { cwd: request.cwd, mcpServers: [] });
@@ -222,10 +238,20 @@ export class RunController {
       if (!this.isActive(id)) return;
       this.store.update(id, { sessionId, status: "running" });
       this.acceptEvent(id, { type: "started", provider: request.provider, sessionId });
+      runtime.stage = "mode";
       const modeSelected = await this.setModeIfAdvertised(runtime, sessionId, request.mode, session);
-      if (!modeSelected) throw new Error(`Provider did not advertise the required ${request.mode} mode.`);
+      if (!modeSelected && request.mode === "implement") {
+        throw new Error("Provider did not advertise the required agent mode for implement.");
+      }
+      if (!modeSelected) {
+        this.acceptEvent(id, {
+          type: "activity",
+          label: `ACP mode: ${request.mode} is not advertised; proceeding with the provider default session mode.`,
+        });
+      }
       if (!this.isActive(id)) return;
-      const completion = await runtime.peer.request("session/prompt", {
+      runtime.stage = "session/prompt";
+      await runtime.peer.request("session/prompt", {
         sessionId,
         prompt: [{ type: "text", text: request.prompt }],
       });
@@ -238,6 +264,7 @@ export class RunController {
         summary: "Provider completed.",
       });
       this.policy.release(runtime.workspace, runtime.mode);
+      runtime.prompt = undefined;
       this.clearTimeout(runtime);
       runtime.peer.terminate();
       this.pruneRuntime();
@@ -262,7 +289,9 @@ export class RunController {
       await runtime.peer.request("session/set_config_option", { sessionId, configId: modeOption.id, value: providerMode });
       return true;
     }
-    const modes = Array.isArray(session.availableModes) ? session.availableModes : [];
+    const modes = Array.isArray(session.availableModes)
+      ? session.availableModes
+      : Array.isArray(session.modes) ? session.modes : [];
     if (modes.some((available) => (
       typeof available === "object" && available !== null && (available as { id?: string }).id === providerMode
     ))) {
@@ -299,29 +328,35 @@ export class RunController {
     runtime.events.push(safeEvent);
     if (runtime.events.length > 500) runtime.events.splice(0, runtime.events.length - 500);
     if (safeEvent.type === "text") runtime.resultText = `${runtime.resultText}${safeEvent.text}`.slice(-1_000_000);
-    if (safeEvent.type === "error") runtime.error = "Provider error; inspect the provider's local diagnostics.";
+    if (safeEvent.type === "error") {
+      const diagnostic = describeFailure(runtime.stage, new Error(safeEvent.message), runtime.workspace, runtime.prompt);
+      runtime.error = diagnostic;
+      safeEvent.message = diagnostic;
+    }
     this.store.appendEvent(id, safeEvent);
   }
 
-  private handleExit(id: string, code: number | null): void {
+  private handleExit(id: string, code: number | null, errorCode?: string): void {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
     const record = this.store.get(id);
-    if (["completed", "cancelled", "failed"].includes(record.status)) return;
-    this.fail(id, new Error(`ACP process exited (${code ?? "signal"}) before completion.`));
+    if (["completed", "cancelled", "failed", "interrupted"].includes(record.status)) return;
+    this.fail(id, new AcpProcessExitError(code, errorCode));
   }
 
-  private fail(id: string, error: unknown): void {
+  private fail(id: string, error: unknown, fallbackStage: LifecycleStage = "spawn"): void {
     const record = this.store.get(id);
     if (isTerminal(record.status)) return;
     const runtime = this.runtime.get(id);
+    const diagnostic = describeFailure(runtime?.stage ?? fallbackStage, error, runtime?.workspace, runtime?.prompt);
     if (runtime) {
-      runtime.error = "Provider error; inspect the provider's local diagnostics.";
+      runtime.error = diagnostic;
+      runtime.prompt = undefined;
       this.policy.release(runtime.workspace, runtime.mode);
       this.clearTimeout(runtime);
     }
-    this.store.update(id, { status: "failed" });
-    this.store.appendEvent(id, { type: "error", message: "Provider failure; inspect the live result for details." });
+    this.store.update(id, { status: "failed", error: diagnostic });
+    this.store.appendEvent(id, { type: "error", message: diagnostic });
   }
 
   private requireRuntime(id: string): RuntimeRun {
@@ -366,4 +401,46 @@ function sanitizeEvent(event: RunEvent, workspace: string): RunEvent | undefined
   const relative = path.relative(workspace, absolute);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
   return { ...event, path: relative || "." };
+}
+
+function describeFailure(
+  stage: LifecycleStage,
+  error: unknown,
+  workspace?: string,
+  prompt?: string,
+): string {
+  if (error instanceof AcpTimeoutError) return `ACP ${stage} timed out.`;
+  if (error instanceof AcpProcessExitError) {
+    if (error.errorCode) return `ACP ${stage} failed: provider process error ${error.errorCode}.`;
+    return `ACP ${stage} failed: provider process exited (${error.exitCode ?? "signal"}).`;
+  }
+  if (error instanceof AcpRpcError) {
+    const code = error.code === undefined ? "unknown" : String(error.code);
+    const detail = error.providerMessage
+      ? ` ${sanitizeDiagnosticText(error.providerMessage, workspace, prompt)}`
+      : "";
+    return `ACP ${stage} was rejected by the provider (JSON-RPC code ${code}).${detail}`.slice(0, 500);
+  }
+  const message = error instanceof Error ? error.message : "Unexpected internal adapter error.";
+  return `ACP ${stage} failed: ${sanitizeDiagnosticText(message, workspace, prompt)}`.slice(0, 500);
+}
+
+function sanitizeDiagnosticText(value: string, workspace?: string, prompt?: string): string {
+  let result = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  if (prompt) result = result.split(prompt).join("[REDACTED PROMPT]");
+  result = result
+    .replace(/\b(bearer)\s+[^\s]+/gi, "$1 [REDACTED]")
+    .replace(/\b(api[_ -]?key|token|secret|password|authorization)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+  result = result.replace(/\/[^\s"'`]+/g, (candidate) => redactPath(candidate, workspace));
+  return result || "Provider returned no diagnostic text.";
+}
+
+function redactPath(candidate: string, workspace?: string): string {
+  if (!workspace) return "[REDACTED PATH]";
+  const absolute = path.resolve(candidate);
+  const relative = path.relative(workspace, absolute);
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    return relative ? `<workspace>/${relative}` : "<workspace>";
+  }
+  return "[REDACTED PATH]";
 }

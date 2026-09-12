@@ -9,7 +9,7 @@ import {
 } from "./provider.ts";
 import { spawnSync } from "node:child_process";
 
-const CANDIDATES = ["cursor", "cursor-agent", "agent"] as const;
+const EXECUTABLE = "cursor-agent";
 
 export type CursorProbeResult = {
   status: number | null;
@@ -56,7 +56,6 @@ export class CursorProvider extends AcpProvider {
   };
   private readonly probe: CursorProbe;
   private resolved?: ResolvedCursorLaunch;
-  private tried = [...CANDIDATES];
 
   constructor(probe: CursorProbe = new ProcessCursorProbe()) {
     super();
@@ -64,19 +63,18 @@ export class CursorProvider extends AcpProvider {
   }
 
   get executable(): string {
-    return this.resolve()?.executable ?? CANDIDATES[0];
+    return this.resolve()?.executable ?? EXECUTABLE;
   }
 
   discover() {
     const resolved = this.resolve();
-    const tried = this.tried.join(", ");
     if (!resolved) {
       return {
         provider: this.name,
         available: false,
-        executable: CANDIDATES[0],
+        executable: EXECUTABLE,
         capabilities: this.capabilities,
-        note: `No usable Cursor ACP executable found on PATH. Tried: ${tried}.`,
+        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`.",
       };
     }
     return {
@@ -85,7 +83,7 @@ export class CursorProvider extends AcpProvider {
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Tried: ${tried}.`,
+      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}.`,
     };
   }
 
@@ -94,7 +92,7 @@ export class CursorProvider extends AcpProvider {
       throw new Error("Model selection unavailable for this Cursor ACP version; the documented ACP entry point does not define a model launch or session parameter.");
     }
     const resolved = this.resolve();
-    if (!resolved) throw new Error(`No usable Cursor ACP executable found on PATH. Tried: ${this.tried.join(", ")}.`);
+    if (!resolved) throw new Error("cursor-agent ACP is unavailable on PATH. This provider intentionally does not fall back to cursor or agent.");
     return [...resolved.args];
   }
 
@@ -115,33 +113,20 @@ export class CursorProvider extends AcpProvider {
 
   private resolve(): ResolvedCursorLaunch | undefined {
     if (this.resolved) return this.resolved;
-    const tried: string[] = [];
-    for (const executable of CANDIDATES) {
-      tried.push(executable);
-      const version = this.probe.run(executable, ["--version"]);
-      if (!succeeded(version)) continue;
-      for (const prefix of acpPrefixes(executable)) {
-        const help = this.probe.run(executable, [...prefix, "--help"]);
-        if (succeeded(help) && /\bacp\b/i.test(`${help.stdout ?? ""}\n${help.stderr ?? ""}`)) {
-          this.tried = tried;
-          this.resolved = {
-            executable,
-            args: prefix,
-            version: firstLine(version.stdout),
-          };
-          return this.resolved;
-        }
-      }
+    const version = this.probe.run(EXECUTABLE, ["--version"]);
+    if (!succeeded(version)) return undefined;
+    const prefix = ["acp"];
+    const help = this.probe.run(EXECUTABLE, [...prefix, "--help"]);
+    if (succeeded(help) && /\bacp\b/i.test(`${help.stdout ?? ""}\n${help.stderr ?? ""}`)) {
+      this.resolved = {
+        executable: EXECUTABLE,
+        args: prefix,
+        version: firstLine(version.stdout),
+      };
+      return this.resolved;
     }
-    this.tried = tried;
     return undefined;
   }
-}
-
-function acpPrefixes(executable: string): string[][] {
-  return executable === "cursor"
-    ? [["acp"], ["agent", "acp"]]
-    : [["acp"]];
 }
 
 function succeeded(result: CursorProbeResult): boolean {

@@ -94,7 +94,7 @@ export class RunStore {
       if (event.type === "file_change" && record.changedFiles.length < 500) {
         record.changedFiles.push({ path: event.path, kind: event.kind });
       }
-      if (event.type === "error") record.error = "Provider reported an error; inspect the live result for details.";
+      if (event.type === "error") record.error = storedDiagnostic(event.message);
       if (event.type === "completed") {
         record.status = "completed";
         record.completed = { exitCode: event.exitCode };
@@ -199,7 +199,7 @@ function sanitizeRunRecord(record: RunRecord): RunRecord {
     events: record.events
       .filter((event) => event && typeof event === "object" && event.type !== "text")
       .map((event) => persistedEvent(event)),
-    error: record.error ? "Provider reported an error; inspect the live result for details." : undefined,
+    error: record.error ? storedDiagnostic(record.error) : undefined,
   };
 }
 
@@ -218,6 +218,14 @@ function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<Run
     case "completed":
       return { type: "completed", summary: "Provider completed.", exitCode: event.exitCode };
   }
+}
+
+function storedDiagnostic(value: string): string {
+  // Only the controller's allowlisted ACP stage diagnostics are persisted.
+  // Provider-provided JSON-RPC messages, prompts, and stderr never reach here.
+  return value.startsWith("ACP ")
+    ? value.replace(/(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]\s*\S+/gi, "$1=[REDACTED]").slice(0, 500)
+    : "Provider reported an error.";
 }
 
 function isProcessAlive(pid: number): boolean {

@@ -93,50 +93,40 @@ class FixtureCursorProbe implements CursorProbe {
   }
 }
 
-test("Cursor discovery selects cursor and its plausible ACP prefix", () => {
-  const probe = new FixtureCursorProbe({
-    "cursor --version": { status: 0, stdout: "Cursor 1.2.3\n" },
-    "cursor acp --help": { status: 1, stderr: "unknown command" },
-    "cursor agent acp --help": { status: 0, stdout: "Usage: cursor agent acp\n" },
-  });
-  const provider = new CursorProvider(probe);
-  const discovery = provider.discover();
-  assert.equal(discovery.available, true);
-  assert.equal(discovery.executable, "cursor");
-  assert.match(discovery.note ?? "", /cursor agent acp/);
-  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["agent", "acp"]);
-  assert.equal(provider.executable, "cursor");
-});
-
-test("Cursor discovery falls back from banned cursor to cursor-agent", () => {
+test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   const probe = new FixtureCursorProbe({
     "cursor-agent --version": { status: 0, stdout: "Cursor Agent 1.2.3\n" },
     "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
   });
-  const discovery = new CursorProvider(probe).discover();
+  const provider = new CursorProvider(probe);
+  const discovery = provider.discover();
   assert.equal(discovery.available, true);
   assert.equal(discovery.executable, "cursor-agent");
-  assert.match(discovery.note ?? "", /Tried: cursor, cursor-agent/);
+  assert.match(discovery.note ?? "", /cursor-agent acp/);
+  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
+  assert.deepEqual(probe.calls.map((call) => call.executable), ["cursor-agent", "cursor-agent"]);
 });
 
-test("Cursor discovery falls back to agent only after higher-priority candidates fail", () => {
+test("Cursor discovery does not fall back to cursor or agent", () => {
   const probe = new FixtureCursorProbe({
-    "agent --version": { status: 0, stdout: "Agent 1.2.3\n" },
-    "agent acp --help": { status: 0, stdout: "Usage: agent acp\n" },
+    "cursor --version": { status: 0, stdout: "unrelated cursor\n" },
+    "cursor acp --help": { status: 0, stdout: "acp\n" },
+    "agent --version": { status: 0, stdout: "blocked agent\n" },
+    "agent acp --help": { status: 0, stdout: "acp\n" },
   });
   const provider = new CursorProvider(probe);
-  assert.equal(provider.discover().executable, "agent");
-  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "plan" }), ["acp"]);
+  assert.equal(provider.discover().available, false);
+  assert.deepEqual(probe.calls, [{ executable: "cursor-agent", args: ["--version"] }]);
 });
 
-test("Cursor discovery reports all tried candidates when no ACP entry is usable", () => {
+test("Cursor discovery reports cursor-agent clearly when its ACP entry is unusable", () => {
   const provider = new CursorProvider(new FixtureCursorProbe({}));
   const discovery = provider.discover();
   assert.equal(discovery.available, false);
-  assert.match(discovery.note ?? "", /Tried: cursor, cursor-agent, agent/);
+  assert.match(discovery.note ?? "", /cursor-agent was not found/);
   assert.throws(
     () => provider.command({ cwd: "/project", prompt: "task", mode: "review" }),
-    /No usable Cursor ACP executable/,
+    /intentionally does not fall back/,
   );
 });
 
@@ -162,10 +152,21 @@ class MockProvider extends AcpProvider {
   readonly transport = new FakeTransport();
   private permissionRequested = false;
   private readonly completeBeforePermission: boolean;
+  private readonly withoutModes: boolean;
+  private readonly rejectedMethod?: string;
+  private readonly rejectionMessage?: string;
 
-  constructor(completeBeforePermission = false) {
+  constructor(options: {
+    completeBeforePermission?: boolean;
+    withoutModes?: boolean;
+    rejectedMethod?: string;
+    rejectionMessage?: string;
+  } = {}) {
     super();
-    this.completeBeforePermission = completeBeforePermission;
+    this.completeBeforePermission = options.completeBeforePermission ?? false;
+    this.withoutModes = options.withoutModes ?? false;
+    this.rejectedMethod = options.rejectedMethod;
+    this.rejectionMessage = options.rejectionMessage;
   }
 
   command(_options: StartOptions): string[] {
@@ -189,7 +190,7 @@ class MockProvider extends AcpProvider {
       const results: Record<string, unknown> = {
         initialize: { authMethods: [{ id: "cached_token" }] },
         authenticate: {},
-        "session/new": {
+        "session/new": this.withoutModes ? { sessionId: "mock-session" } : {
           sessionId: "mock-session",
           configOptions: [{
             id: "mode",
@@ -199,6 +200,10 @@ class MockProvider extends AcpProvider {
         },
         "session/set_config_option": {},
       };
+      if (message.method === this.rejectedMethod) {
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.rejectionMessage } });
+        return;
+      }
       if (message.method === "session/prompt") {
         this.transport.emit({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "mocked answer" } } } });
         this.transport.emit({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: {} });
@@ -240,11 +245,43 @@ test("controller leaves permission pending and safely cancels without auto-appro
 
 test("controller terminates a provider that completes while permission remains pending", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  const provider = new MockProvider(true);
+  const provider = new MockProvider({ completeBeforePermission: true });
   const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
   const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(controller.status(run.id).status, "failed");
+});
+
+test("review proceeds with a provider default mode when mode metadata is absent", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider({ withoutModes: true });
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review only", mode: "review" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const status = controller.status(run.id);
+  assert.equal(status.status, "waiting_permission");
+  assert.ok((status.liveEvents as Array<{ type: string; label?: string }>).some((event) => (
+    event.type === "activity" && event.label?.includes("not advertised")
+  )));
+  await controller.cancel(run.id);
+});
+
+test("failure status and result retain sanitized ACP stage diagnostics", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+  const provider = new MockProvider({
+    rejectedMethod: "session/new",
+    rejectionMessage: "token=super-secret; prompt: sensitive request; /outside/private/path unavailable",
+  });
+  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "sensitive request", mode: "plan" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const status = controller.status(run.id);
+  const result = controller.result(run.id);
+  assert.match(String(status.error), /ACP session\/new was rejected/);
+  assert.match(String(result.error), /token=\[REDACTED\]/);
+  assert.equal(String(result.error).includes("super-secret"), false);
+  assert.equal(String(result.error).includes("sensitive request"), false);
+  assert.equal(String(result.error).includes("/outside/private/path"), false);
 });
 
 test("controller terminates an ACP run that exceeds its configured lifetime", async () => {

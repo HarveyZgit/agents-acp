@@ -49,7 +49,7 @@ export type RpcMessage = {
 export interface LineTransport {
   write(line: string): void;
   onLine(listener: (line: string) => void): void;
-  onExit(listener: (code: number | null) => void): void;
+  onExit(listener: (code: number | null, errorCode?: string) => void): void;
   terminate(): void;
 }
 
@@ -71,13 +71,45 @@ export class ChildProcessTransport implements LineTransport {
     readline.createInterface({ input: this.child.stdout }).on("line", listener);
   }
 
-  onExit(listener: (code: number | null) => void): void {
+  onExit(listener: (code: number | null, errorCode?: string) => void): void {
     this.child.on("exit", listener);
-    this.child.on("error", () => listener(null));
+    this.child.on("error", (error: NodeJS.ErrnoException) => listener(null, error.code));
+    this.child.stdin.on("error", (error: NodeJS.ErrnoException) => listener(null, error.code));
   }
 
   terminate(): void {
     this.child.kill();
+  }
+}
+
+export class AcpTimeoutError extends Error {
+  readonly method: string;
+
+  constructor(method: string) {
+    super(`ACP ${method} timed out`);
+    this.method = method;
+  }
+}
+
+export class AcpRpcError extends Error {
+  readonly code: number | undefined;
+  readonly providerMessage: string | undefined;
+
+  constructor(code: number | undefined, providerMessage?: string) {
+    super("ACP provider returned a JSON-RPC error");
+    this.code = code;
+    this.providerMessage = providerMessage;
+  }
+}
+
+export class AcpProcessExitError extends Error {
+  readonly exitCode: number | null;
+  readonly errorCode: string | undefined;
+
+  constructor(exitCode: number | null, errorCode?: string) {
+    super("ACP provider process exited");
+    this.exitCode = exitCode;
+    this.errorCode = errorCode;
   }
 }
 
@@ -100,9 +132,9 @@ export class JsonRpcPeer {
     this.onNotification = onNotification;
     this.onRequest = onRequest;
     transport.onLine((line) => this.receive(line));
-    transport.onExit((code) => {
+    transport.onExit((code, errorCode) => {
       for (const request of this.pending.values()) {
-        request.reject(new Error(`ACP process exited (${code ?? "signal"})`));
+        request.reject(new AcpProcessExitError(code, errorCode));
       }
       this.pending.clear();
     });
@@ -112,7 +144,7 @@ export class JsonRpcPeer {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`${method} timed out`));
+        if (this.pending.delete(id)) reject(new AcpTimeoutError(method));
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (result) => {
@@ -124,7 +156,11 @@ export class JsonRpcPeer {
           reject(error);
         },
       });
-      this.transport.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      try {
+        this.transport.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      } catch {
+        if (this.pending.delete(id)) reject(new AcpProcessExitError(null, "EPIPE"));
+      }
     });
   }
 
@@ -157,7 +193,7 @@ export class JsonRpcPeer {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message ?? "ACP request failed"));
+      if (message.error) pending.reject(new AcpRpcError(message.error.code, message.error.message));
       else pending.resolve(message.result ?? {});
       return;
     }

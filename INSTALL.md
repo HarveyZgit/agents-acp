@@ -1,4 +1,4 @@
-# Linux Codex installation — external-acp-collaboration 0.1.6
+# Linux Codex installation — external-acp-collaboration 0.1.8
 
 ## Preconditions
 
@@ -54,9 +54,8 @@ Run only read-only commands first:
 
 ```bash
 node --version
-cursor --version
 cursor-agent --version
-agent --version
+cursor-agent acp --help
 grok --version
 grok --help
 grok agent --help
@@ -66,11 +65,11 @@ npm test
 npm run smoke:main
 ```
 
-The Cursor adapter tries `cursor`, `cursor-agent`, then `agent`. Only one must
-be installed. It checks `--version` and a short ACP `--help` probe, selecting
-either `cursor acp`, `cursor agent acp`, or `<candidate> acp` as appropriate.
-`list_external_agent_providers` reports the selected binary and argv prefix,
-which start and resume reuse.
+The Cursor adapter uses only `cursor-agent acp`. It checks
+`cursor-agent --version` and a short `cursor-agent acp --help` probe.
+`list_external_agent_providers` reports that resolved executable and argv
+prefix, which start and resume reuse. It intentionally never falls back to
+`cursor` or `agent`, which may conflict with unrelated local tools.
 
 `smoke:main` launches a fresh MCP server and its bundled fake ACP fixture. It
 requires neither Codex authentication nor Cursor/Grok binaries, and verifies
@@ -116,8 +115,8 @@ workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/external-acp-collaboration-0.1.6.zip` and
-`dist/external-acp-collaboration-0.1.6.tar.gz` are portable copies of the
+`dist/external-acp-collaboration-0.1.8.zip` and
+`dist/external-acp-collaboration-0.1.8.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -125,9 +124,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/external-acp-collaboration-0.1.6.tar.gz
-tar -C . -czf dist/external-acp-collaboration-0.1.6.tar.gz external-acp-collaboration
-rm -f dist/external-acp-collaboration-0.1.6.zip
-zip -qr dist/external-acp-collaboration-0.1.6.zip external-acp-collaboration
-sha256sum dist/external-acp-collaboration-0.1.6.{tar.gz,zip}
+rm -f dist/external-acp-collaboration-0.1.8.tar.gz
+tar -C . -czf dist/external-acp-collaboration-0.1.8.tar.gz external-acp-collaboration
+rm -f dist/external-acp-collaboration-0.1.8.zip
+zip -qr dist/external-acp-collaboration-0.1.8.zip external-acp-collaboration
+sha256sum dist/external-acp-collaboration-0.1.8.{tar.gz,zip}
 ```
