@@ -5,7 +5,7 @@
   },
   "plugins": [
     {
-      "name": "external-acp-collaboration",
+      "name": "agents-acp",
       "source": {
         "source": "local",
         "path": "./external-acp-collaboration"

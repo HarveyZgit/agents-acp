@@ -24,8 +24,8 @@ let initialized = false;
 const permissionResponsesEnabled = process.env.EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES === "1";
 
 const tools = [
-  tool("list_external_agent_providers", "Discover locally installed ACP providers and their documented capabilities.", { type: "object", properties: {} }),
-  tool("start_external_agent", "Start an ACP run. Implement mode requires allowImplement: true and is serialized per workspace.", {
+  tool("list_providers", "Discover locally installed ACP providers and their documented capabilities.", { type: "object", properties: {} }),
+  tool("start", "Start an ACP run. Implement mode requires allowImplement: true and is serialized per workspace.", {
     type: "object",
     required: ["provider", "cwd", "prompt", "mode"],
     properties: {
@@ -37,9 +37,9 @@ const tools = [
       model: { type: "string" },
     },
   }),
-  tool("get_external_agent_status", "Return status, elapsed time, pending user decisions, and recent in-memory events.", schema(["runId"])),
-  tool("cancel_external_agent", "Request ACP cancellation and terminate the local provider process.", schema(["runId"])),
-  tool("resume_external_agent", "Resume a saved ACP provider session in the same cwd.", {
+  tool("status", "Return status, elapsed time, pending user decisions, and recent in-memory events.", schema(["runId"])),
+  tool("cancel", "Request ACP cancellation and terminate the local provider process.", schema(["runId"])),
+  tool("resume", "Resume a saved ACP provider session in the same cwd.", {
     type: "object",
     required: ["followUp"],
     properties: {
@@ -50,8 +50,8 @@ const tools = [
       allowImplement: { type: "boolean" },
     },
   }),
-  tool("get_external_agent_result", "Return final in-memory text, changed-file summary, errors, and verification advice.", schema(["runId"])),
-  tool("respond_external_agent_permission", "Submit a user-confirmed, single-use response to a pending ACP permission. Keep this tool approval-prompted in Codex.", {
+  tool("result", "Return final in-memory text, changed-file summary, errors, and verification advice.", schema(["runId"])),
+  tool("respond_permission", "Submit a user-confirmed, single-use response to a pending ACP permission. Keep this tool approval-prompted in Codex.", {
     type: "object",
     required: ["runId", "requestId", "decision", "userConfirmed"],
     properties: {
@@ -95,7 +95,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "external-acp-collaboration", version: "0.1.8" },
+        serverInfo: { name: "agents-acp", version: "0.1.9" },
         instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending until an approval-prompted, user-confirmed response tool call.",
       };
     case "ping":
@@ -113,15 +113,15 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     case "resources/templates/list":
       return {
         resourceTemplates: [{
-          uriTemplate: "external-acp://runs/{runId}",
-          name: "External ACP run panel",
+          uriTemplate: "agents-acp://runs/{runId}",
+          name: "agents-acp run panel",
           description: "Structured run state with an optional generic HTML rendering.",
           mimeType: "text/html",
         }],
       };
     case "resources/read": {
       const uri = requiredString(params.uri, "resource URI", 512, true);
-      const match = /^external-acp:\/\/runs\/([^/]+)$/.exec(uri);
+      const match = /^agents-acp:\/\/runs\/([^/]+)$/.exec(uri);
       if (!match) throw new Error("Unknown resource URI.");
       const run = controller.status(match[1]);
       return { contents: [{ uri, mimeType: "text/html", text: renderRunPanel(run) }] };
@@ -135,11 +135,11 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
   try {
     let result: unknown;
     switch (name) {
-      case "list_external_agent_providers":
+      case "list_providers":
         onlyKeys(args, []);
         result = controller.listProviders();
         break;
-      case "start_external_agent":
+      case "start":
         onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
         requireWorkspaceConfiguration();
         result = controller.start({
@@ -151,15 +151,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
           model: optionalString(args.model, "model", 256),
         });
         break;
-      case "get_external_agent_status":
+      case "status":
         onlyKeys(args, ["runId"]);
         result = controller.status(requiredString(args.runId, "runId", 128));
         break;
-      case "cancel_external_agent":
+      case "cancel":
         onlyKeys(args, ["runId"]);
         result = await controller.cancel(requiredString(args.runId, "runId", 128));
         break;
-      case "resume_external_agent":
+      case "resume":
         onlyKeys(args, ["runId", "provider", "sessionId", "followUp", "allowImplement"]);
         requireWorkspaceConfiguration();
         result = controller.resume({
@@ -170,11 +170,11 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
           allowImplement: args.allowImplement === true,
         });
         break;
-      case "get_external_agent_result":
+      case "result":
         onlyKeys(args, ["runId"]);
         result = controller.result(requiredString(args.runId, "runId", 128));
         break;
-      case "respond_external_agent_permission":
+      case "respond_permission":
         onlyKeys(args, ["runId", "requestId", "decision", "userConfirmed"]);
         if (!permissionResponsesEnabled) {
           throw new Error("Permission responses are disabled until EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1 is explicitly configured.");

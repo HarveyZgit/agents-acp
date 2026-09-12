@@ -10,10 +10,10 @@ export function renderRunPanel(run: Record<string, unknown>): string {
   const activity = escape(String(run.lastActivity ?? "Waiting for provider updates"));
   const files = Array.isArray(run.changedFiles) ? run.changedFiles : [];
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>External ACP run</title></head>
+<html><head><meta charset="utf-8"><title>agents-acp run</title></head>
 <body>
-  <section data-external-acp-run="${runId}">
-    <h2>External ACP collaboration</h2>
+  <section data-agents-acp-run="${runId}">
+    <h2>agents-acp</h2>
     <p>Status: ${status} · Elapsed: ${elapsed}ms</p>
     <p>${activity}</p>
     <h3>Changed files</h3>

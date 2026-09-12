@@ -21,19 +21,19 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   child.stdin.write("null\n");
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
-    name: "start_external_agent",
+    name: "start",
     arguments: { provider: "grok", cwd: "/tmp", prompt: "test", mode: "review" },
   } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
-    name: "start_external_agent",
+    name: "start",
     arguments: ["not-an-object"],
   } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
-    name: "get_external_agent_status",
+    name: "status",
     arguments: { runId: "x", unexpected: true },
   } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: {
-    name: "respond_external_agent_permission",
+    name: "respond_permission",
     arguments: { runId: "x", requestId: "rpc-1", decision: "allow-once", userConfirmed: true },
   } })}\n`);
   child.stdin.end();

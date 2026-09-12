@@ -1,6 +1,6 @@
 # agents-acp
 
-`external-acp-collaboration` is a Codex Desktop plugin that delegates a scoped
+`agents-acp` is a Codex Desktop plugin that delegates a scoped
 task to a locally installed ACP-capable coding agent. The first adapters target
 Grok Build (`grok agent stdio`) and Cursor CLI. Cursor uses only the official
 `cursor-agent acp` entry point; it never invokes `cursor` or the banned
@@ -8,7 +8,7 @@ Grok Build (`grok agent stdio`) and Cursor CLI. Cursor uses only the official
 
 ## Architecture
 
-The plugin exposes a local stdio MCP server to Codex. That server starts a
+The plugin exposes the `agents-acp` local stdio MCP server to Codex. That server starts a
 provider using argument arrays (never a shell command), speaks newline-delimited
 JSON-RPC ACP over stdio, and normalizes provider output into `started`, `text`,
 `activity`, `permission`, `file_change`, `error`, and `completed` events.
@@ -62,7 +62,7 @@ codex plugin marketplace add /absolute/path/to/agents-acp
 
 The `.mcp.json` file follows the current documented Codex bundled-MCP
 `mcp_servers` shape. It exposes structured tool responses and an
-`external-acp://runs/{runId}` HTML resource. It does not declare a Codex custom
+`agents-acp://runs/{runId}` HTML resource. It does not declare a Codex custom
 app panel: the current documented manifest only supports `.app.json` for a
 registered MCP server mapping, not a generic embedded plugin UI. Wiring
 `ui/run-panel/run-panel.ts` into a native expandable desktop panel therefore
@@ -84,7 +84,7 @@ grok agent --help
 
 The Cursor provider probes only `cursor-agent --version` and
 `cursor-agent acp --help`, then records `cursor-agent acp` in
-`list_external_agent_providers`. That resolved command is reused for start and
+`list_providers`. That resolved command is reused for start and
 resume, preventing a fallback to a conflicting `cursor` or `agent` binary.
 
 Confirm existing provider authentication using each provider's documented local
@@ -100,10 +100,10 @@ cd external-acp-collaboration/mcp-server
 npm test
 ```
 
-Finally, in Codex, call `list_external_agent_providers`, start a harmless
+Finally, in Codex, call `list_providers`, start a harmless
 `review` or `plan` run, and verify status/result tools and the resource. If a
 permission is requested, select `allow-once` or `reject-once` yourself and
-call `respond_external_agent_permission` with `userConfirmed: true`. Test
+call `respond_permission` with `userConfirmed: true`. Test
 `implement` only in a disposable workspace after the two explicit opt-ins
 documented in `INSTALL.md`.
 

@@ -1,4 +1,4 @@
-# Linux Codex installation — external-acp-collaboration 0.1.8
+# Linux Codex installation — agents-acp 0.1.9
 
 ## Preconditions
 
@@ -29,7 +29,7 @@ export EXTERNAL_ACP_ALLOWED_SUBTREES="/absolute/path/to/project/packages"
 export EXTERNAL_ACP_MAX_RUN_MS=7200000
 
 # Required before any pending ACP permission can receive a response.
-# Keep respond_external_agent_permission approval-prompted in Codex.
+# Keep respond_permission approval-prompted in Codex.
 export EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1
 
 # Register the repository as a local Codex marketplace, then verify it.
@@ -39,11 +39,11 @@ codex plugin marketplace list
 
 Start the Codex client from the same environment so the bundled MCP server
 inherits `EXTERNAL_ACP_WORKSPACE`. In the Desktop app, install and enable
-`external-acp-collaboration` from the added marketplace, then enable its
+`agents-acp` from the added marketplace, then enable its
 bundled MCP server. Restart the desktop app after changing plugin files.
 
-The plugin fails closed: `start_external_agent` and
-`resume_external_agent` return an error when `EXTERNAL_ACP_WORKSPACE` is not
+The plugin fails closed: `start` and
+`resume` return an error when `EXTERNAL_ACP_WORKSPACE` is not
 present or does not name an existing directory. A Desktop launcher that does
 not inherit shell variables needs an OS-level environment configuration; no
 portable Codex Desktop setting for that is documented here.
@@ -67,7 +67,7 @@ npm run smoke:main
 
 The Cursor adapter uses only `cursor-agent acp`. It checks
 `cursor-agent --version` and a short `cursor-agent acp --help` probe.
-`list_external_agent_providers` reports that resolved executable and argv
+`list_providers` reports that resolved executable and argv
 prefix, which start and resume reuse. It intentionally never falls back to
 `cursor` or `agent`, which may conflict with unrelated local tools.
 
@@ -79,15 +79,15 @@ the fake provider only in the smoke process.
 
 In Codex, enable the plugin and call:
 
-1. `list_external_agent_providers`
-2. `start_external_agent` with `mode: "review"` and a harmless read-only
+1. `list_providers`
+2. `start` with `mode: "review"` and a harmless read-only
    prompt, with `cwd` inside `EXTERNAL_ACP_WORKSPACE`
-3. `get_external_agent_status` while it runs, then
-   `get_external_agent_result` after completion
+3. `status` while it runs, then
+   `result` after completion
 
 If a provider asks permission, the run remains pending. It is never approved
 automatically. After the human selects `allow-once` or `reject-once`, call
-`respond_external_agent_permission` with the run ID, pending request ID,
+`respond_permission` with the run ID, pending request ID,
 chosen decision, and `userConfirmed: true`. Keep this tool in Codex's
 approval-prompted policy; `userConfirmed` records an explicit caller
 assertion but cannot cryptographically prove user presence.
@@ -109,14 +109,14 @@ export EXTERNAL_ACP_WORKSPACE="/absolute/path/to/disposable-project"
 export EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT=1
 ```
 
-Then use `start_external_agent` with `mode: "implement"` and
+Then use `start` with `mode: "implement"` and
 `allowImplement: true`. The plugin serializes this mode per configured
 workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/external-acp-collaboration-0.1.8.zip` and
-`dist/external-acp-collaboration-0.1.8.tar.gz` are portable copies of the
+`dist/agents-acp-0.1.9.zip` and
+`dist/agents-acp-0.1.9.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -124,9 +124,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/external-acp-collaboration-0.1.8.tar.gz
-tar -C . -czf dist/external-acp-collaboration-0.1.8.tar.gz external-acp-collaboration
-rm -f dist/external-acp-collaboration-0.1.8.zip
-zip -qr dist/external-acp-collaboration-0.1.8.zip external-acp-collaboration
-sha256sum dist/external-acp-collaboration-0.1.8.{tar.gz,zip}
+rm -f dist/agents-acp-0.1.9.tar.gz
+tar -C . -czf dist/agents-acp-0.1.9.tar.gz external-acp-collaboration
+rm -f dist/agents-acp-0.1.9.zip
+zip -qr dist/agents-acp-0.1.9.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.1.9.{tar.gz,zip}
 ```
