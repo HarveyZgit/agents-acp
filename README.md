@@ -94,6 +94,13 @@ both `status` and `result`. JSON-RPC error codes, process error/exit codes,
 and advertised authentication method IDs/types are retained; prompt text,
 token-like values, and paths outside the workspace are redacted.
 
+Cursor ACP inherits the environment of the Codex process by default, matching
+the interactive Cursor CLI behavior needed for macOS login/keychain context.
+Start Codex from the same user session where `cursor-agent status` succeeds.
+Set `EXTERNAL_ACP_ENV_MODE=allowlist` only when that restricted behavior is
+intentional. Sanitized stderr tails are exposed as `diagnostic` while a run is
+active and included in a terminal failure; stderr is never logged to disk.
+
 Confirm existing provider authentication using each provider's documented local
 status/login help without exposing tokens. Cursor ACP uses the advertised
 `cursor_login` method; Grok ACP uses an existing cached login token or a

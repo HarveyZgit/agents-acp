@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 class FakeTransport implements LineTransport {
   writes: string[] = [];
   private lines: Array<(line: string) => void> = [];
+  private stderr: Array<(chunk: string) => void> = [];
   private exits: Array<(code: number | null) => void> = [];
 
   write(line: string): void {
@@ -29,6 +30,9 @@ class FakeTransport implements LineTransport {
   }
   onLine(listener: (line: string) => void): void {
     this.lines.push(listener);
+  }
+  onStderr(listener: (chunk: string) => void): void {
+    this.stderr.push(listener);
   }
   onExit(listener: (code: number | null) => void): void {
     this.exits.push(listener);
@@ -38,6 +42,9 @@ class FakeTransport implements LineTransport {
   }
   emit(message: unknown): void {
     for (const listener of this.lines) listener(JSON.stringify(message));
+  }
+  emitStderr(chunk: string): void {
+    for (const listener of this.stderr) listener(chunk);
   }
 }
 
@@ -142,6 +149,28 @@ test("Cursor authentication accepts methodId and never authenticates terminal me
   );
 });
 
+test("Cursor ACP inherits the launcher environment by default", () => {
+  class InspectableCursorProvider extends CursorProvider {
+    inspectEnvironment(): NodeJS.ProcessEnv {
+      return this.environment();
+    }
+  }
+  const priorMode = process.env.EXTERNAL_ACP_ENV_MODE;
+  const priorMarker = process.env.CURSOR_SESSION_MARKER;
+  process.env.CURSOR_SESSION_MARKER = "available-to-cursor";
+  try {
+    const provider = new InspectableCursorProvider(new FixtureCursorProbe({}));
+    assert.equal(provider.inspectEnvironment().CURSOR_SESSION_MARKER, "available-to-cursor");
+    process.env.EXTERNAL_ACP_ENV_MODE = "allowlist";
+    assert.equal(provider.inspectEnvironment().CURSOR_SESSION_MARKER, undefined);
+  } finally {
+    if (priorMode === undefined) delete process.env.EXTERNAL_ACP_ENV_MODE;
+    else process.env.EXTERNAL_ACP_ENV_MODE = priorMode;
+    if (priorMarker === undefined) delete process.env.CURSOR_SESSION_MARKER;
+    else process.env.CURSOR_SESSION_MARKER = priorMarker;
+  }
+});
+
 test("provider environment is allowlisted and does not inherit unrelated secrets", () => {
   const previous = process.env.UNRELATED_TEST_SECRET;
   process.env.UNRELATED_TEST_SECRET = "do-not-forward";
@@ -170,6 +199,7 @@ class MockProvider extends AcpProvider {
   private readonly sessionFirstFails: boolean;
   private readonly authenticationInvalidParams: boolean;
   private readonly authMethods: unknown[];
+  private readonly stderrOnRejected?: string;
   private sessionAttempts = 0;
 
   constructor(options: {
@@ -180,6 +210,7 @@ class MockProvider extends AcpProvider {
     sessionFirstFails?: boolean;
     authenticationInvalidParams?: boolean;
     authMethods?: unknown[];
+    stderrOnRejected?: string;
   } = {}) {
     super();
     this.completeBeforePermission = options.completeBeforePermission ?? false;
@@ -189,6 +220,7 @@ class MockProvider extends AcpProvider {
     this.sessionFirstFails = options.sessionFirstFails ?? false;
     this.authenticationInvalidParams = options.authenticationInvalidParams ?? false;
     this.authMethods = options.authMethods ?? [{ id: "cached_token" }];
+    this.stderrOnRejected = options.stderrOnRejected;
   }
 
   command(_options: StartOptions): string[] {
@@ -228,6 +260,7 @@ class MockProvider extends AcpProvider {
         "session/set_config_option": {},
       };
       if (message.method === this.rejectedMethod) {
+        if (this.stderrOnRejected) this.transport.emitStderr(this.stderrOnRejected);
         this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.rejectionMessage } });
         return;
       }
@@ -360,6 +393,7 @@ test("failure status and result retain sanitized ACP stage diagnostics", async (
   const provider = new MockProvider({
     rejectedMethod: "session/new",
     rejectionMessage: "token=super-secret; prompt: sensitive request; /outside/private/path unavailable",
+    stderrOnRejected: "cursor detail authorization=hidden-value /outside/keychain",
   });
   const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
   const run = controller.start({ provider: "grok", cwd: workspace, prompt: "sensitive request", mode: "plan" });
@@ -371,6 +405,8 @@ test("failure status and result retain sanitized ACP stage diagnostics", async (
   assert.equal(String(result.error).includes("super-secret"), false);
   assert.equal(String(result.error).includes("sensitive request"), false);
   assert.equal(String(result.error).includes("/outside/private/path"), false);
+  assert.match(String(result.error), /Provider stderr:/);
+  assert.equal(String(result.error).includes("hidden-value"), false);
 });
 
 test("authenticate failures include only safe advertised auth method summaries", async () => {

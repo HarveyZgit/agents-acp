@@ -53,6 +53,7 @@ export type RpcMessage = {
 export interface LineTransport {
   write(line: string): void;
   onLine(listener: (line: string) => void): void;
+  onStderr(listener: (chunk: string) => void): void;
   onExit(listener: (code: number | null, errorCode?: string) => void): void;
   terminate(): void;
 }
@@ -62,9 +63,6 @@ export class ChildProcessTransport implements LineTransport {
 
   constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child;
-    // ACP reserves stdout for JSON-RPC. Discard diagnostic stderr so that it
-    // cannot block a long-lived provider and is never persisted by this plugin.
-    this.child.stderr.resume();
   }
 
   write(line: string): void {
@@ -73,6 +71,11 @@ export class ChildProcessTransport implements LineTransport {
 
   onLine(listener: (line: string) => void): void {
     readline.createInterface({ input: this.child.stdout }).on("line", listener);
+  }
+
+  onStderr(listener: (chunk: string) => void): void {
+    this.child.stderr.setEncoding("utf8");
+    this.child.stderr.on("data", listener);
   }
 
   onExit(listener: (code: number | null, errorCode?: string) => void): void {

@@ -39,6 +39,8 @@ type RuntimeRun = {
   prompt?: string;
   error?: string;
   authMethodsSummary?: string;
+  stderrTail?: string;
+  preauthenticatedSessionAttempted: boolean;
   stage: LifecycleStage;
   timeout?: NodeJS.Timeout;
 };
@@ -102,6 +104,7 @@ export class RunController {
         pendingRequests: new Map(),
         resultText: "",
         prompt: request.prompt,
+        preauthenticatedSessionAttempted: false,
         stage: "spawn",
       };
       const peer = new JsonRpcPeer(
@@ -111,6 +114,7 @@ export class RunController {
       );
       runtime.peer = peer;
       this.runtime.set(current.id, runtime);
+      transport.onStderr((chunk) => this.captureStderr(current.id, chunk));
       runtime.timeout = setTimeout(() => {
         if (this.isActive(current.id)) {
           this.fail(current.id, new Error("ACP run exceeded its configured maximum duration."));
@@ -135,6 +139,7 @@ export class RunController {
       error: runtime?.error ?? record.error,
       stage: runtime?.stage,
       authMethods: runtime?.authMethodsSummary,
+      diagnostic: runtime?.stderrTail,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
       pendingRequests: [...(runtime?.pendingRequests.keys() ?? [])],
@@ -223,13 +228,14 @@ export class RunController {
       const initialized = await runtime.peer.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "agents-acp", version: "0.1.10" },
+        clientInfo: { name: "agents-acp", version: "0.1.11" },
       });
       if (!this.isActive(id)) return;
       runtime.authMethodsSummary = summarizeAuthMethods(initialized);
       const authMethod = runtime.provider.authenticationMethod(initialized);
       let session: Record<string, unknown>;
       if (runtime.provider.prefersSessionBeforeAuthentication()) {
+        runtime.preauthenticatedSessionAttempted = true;
         try {
           session = await this.createSession(runtime, request);
         } catch (sessionError) {
@@ -378,6 +384,8 @@ export class RunController {
         runtime.workspace,
         runtime.prompt,
         runtime.authMethodsSummary,
+        runtime.stderrTail,
+        runtime.provider.name === "cursor" && runtime.preauthenticatedSessionAttempted,
       );
       runtime.error = diagnostic;
       safeEvent.message = diagnostic;
@@ -403,6 +411,8 @@ export class RunController {
       runtime?.workspace,
       runtime?.prompt,
       runtime?.authMethodsSummary,
+      runtime?.stderrTail,
+      runtime?.provider.name === "cursor" && runtime.preauthenticatedSessionAttempted,
     );
     if (runtime) {
       runtime.error = diagnostic;
@@ -436,6 +446,13 @@ export class RunController {
   private clearTimeout(runtime: RuntimeRun): void {
     if (runtime.timeout) clearTimeout(runtime.timeout);
     runtime.timeout = undefined;
+  }
+
+  private captureStderr(id: string, chunk: string): void {
+    const runtime = this.runtime.get(id);
+    if (!runtime || isTerminal(this.store.get(id).status)) return;
+    const sanitized = sanitizeDiagnosticText(chunk, runtime.workspace, runtime.prompt);
+    runtime.stderrTail = `${runtime.stderrTail ?? ""}${sanitized}\n`.slice(-2_000).trim();
   }
 }
 
@@ -489,25 +506,35 @@ function describeFailure(
   workspace?: string,
   prompt?: string,
   authMethodsSummary?: string,
+  stderrTail?: string,
+  preauthenticatedCursorSession = false,
 ): string {
-  if (error instanceof AcpTimeoutError) return withAuthSummary(`ACP ${stage} timed out.`, stage, authMethodsSummary);
-  if (error instanceof AcpProcessExitError) {
-    if (error.errorCode) return withAuthSummary(`ACP ${stage} failed: provider process error ${error.errorCode}.`, stage, authMethodsSummary);
-    return withAuthSummary(`ACP ${stage} failed: provider process exited (${error.exitCode ?? "signal"}).`, stage, authMethodsSummary);
-  }
-  if (error instanceof AcpRpcError) {
+  let message: string;
+  if (error instanceof AcpTimeoutError) {
+    message = `ACP ${stage} timed out.`;
+  } else if (error instanceof AcpProcessExitError) {
+    message = error.errorCode
+      ? `ACP ${stage} failed: provider process error ${error.errorCode}.`
+      : `ACP ${stage} failed: provider process exited (${error.exitCode ?? "signal"}).`;
+  } else if (error instanceof AcpRpcError) {
     const code = error.code === undefined ? "unknown" : String(error.code);
     const detail = error.providerMessage
       ? ` ${sanitizeDiagnosticText(error.providerMessage, workspace, prompt)}`
       : "";
-    return withAuthSummary(`ACP ${stage} was rejected by the provider (JSON-RPC code ${code}).${detail}`.slice(0, 500), stage, authMethodsSummary);
+    message = `ACP ${stage} was rejected by the provider (JSON-RPC code ${code}).${detail}`;
+  } else {
+    const raw = error instanceof Error ? error.message : "Unexpected internal adapter error.";
+    message = `ACP ${stage} failed: ${sanitizeDiagnosticText(raw, workspace, prompt)}`;
   }
-  const message = error instanceof Error ? error.message : "Unexpected internal adapter error.";
-  return withAuthSummary(`ACP ${stage} failed: ${sanitizeDiagnosticText(message, workspace, prompt)}`.slice(0, 500), stage, authMethodsSummary);
+  if (preauthenticatedCursorSession && (stage === "session/new" || stage === "session/load")) {
+    message = `ACP ${stage} failed after the pre-authenticated Cursor path: the ACP child could not reuse the logged-in Cursor CLI session. Start Codex from the same user login/keychain environment where cursor-agent status works. ${message}`;
+  }
+  if (stderrTail) message = `${message.slice(0, 320)} Provider stderr: ${stderrTail.slice(-140)}`;
+  return withAuthSummary(message.slice(0, 500), stage, authMethodsSummary, preauthenticatedCursorSession);
 }
 
-function withAuthSummary(message: string, stage: LifecycleStage, summary?: string): string {
-  return stage === "authenticate" && summary
+function withAuthSummary(message: string, stage: LifecycleStage, summary?: string, includeForPreauthenticatedSession = false): string {
+  return (stage === "authenticate" || includeForPreauthenticatedSession) && summary
     ? `${message} Advertised auth methods: ${summary}.`.slice(0, 500)
     : message;
 }

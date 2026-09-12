@@ -1,4 +1,4 @@
-# Linux Codex installation — agents-acp 0.1.10
+# Linux Codex installation — agents-acp 0.1.11
 
 ## Preconditions
 
@@ -77,6 +77,12 @@ for an advertised non-terminal method when session creation requires it.
 Terminal auth methods and an omitted `authMethods` list are never sent to
 `authenticate`.
 
+For Cursor ACP, start Codex from the same macOS/Linux user session where
+`cursor-agent status` works. The Cursor child inherits Codex's environment by
+default so that existing login/keychain context remains available. Do not set
+`EXTERNAL_ACP_ENV_MODE=allowlist` unless a deliberately restricted Cursor
+environment is required.
+
 `smoke:main` launches a fresh MCP server and its bundled fake ACP fixture. It
 requires neither Codex authentication nor Cursor/Grok binaries, and verifies
 provider discovery, start, streamed events, permission waiting, explicit
@@ -121,8 +127,8 @@ workspace but does not claim to provide OS-level filesystem isolation.
 
 ## Archive
 
-`dist/agents-acp-0.1.10.zip` and
-`dist/agents-acp-0.1.10.tar.gz` are portable copies of the
+`dist/agents-acp-0.1.11.zip` and
+`dist/agents-acp-0.1.11.tar.gz` are portable copies of the
 plugin folder. Extract either into a directory, then create a marketplace
 entry whose `source.path` is `./external-acp-collaboration` relative to that
 marketplace root.
@@ -130,9 +136,9 @@ marketplace root.
 Rebuild the archive from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.1.10.tar.gz
-tar -C . -czf dist/agents-acp-0.1.10.tar.gz external-acp-collaboration
-rm -f dist/agents-acp-0.1.10.zip
-zip -qr dist/agents-acp-0.1.10.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.1.10.{tar.gz,zip}
+rm -f dist/agents-acp-0.1.11.tar.gz
+tar -C . -czf dist/agents-acp-0.1.11.tar.gz external-acp-collaboration
+rm -f dist/agents-acp-0.1.11.zip
+zip -qr dist/agents-acp-0.1.11.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.1.11.{tar.gz,zip}
 ```

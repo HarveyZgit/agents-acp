@@ -121,6 +121,12 @@ export class CursorProvider extends AcpProvider {
   }
 
   protected environment(): NodeJS.ProcessEnv {
+    if (process.env.EXTERNAL_ACP_ENV_MODE !== "allowlist") {
+      // Cursor login can be mediated by macOS Keychain and session-specific
+      // variables. Preserve the launcher's environment by default, matching
+      // the documented CLI examples, without ever logging its values.
+      return { ...process.env };
+    }
     return addEnvironmentVariables(baseEnvironment(), ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"]);
   }
 
