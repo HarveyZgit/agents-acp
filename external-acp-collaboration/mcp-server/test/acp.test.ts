@@ -13,7 +13,7 @@ import {
 import { RunController } from "../src/run-controller.ts";
 import { WorkspacePolicy } from "../src/policy.ts";
 import { RunStore } from "../src/run-store.ts";
-import { CursorProvider } from "../src/acp/cursor.ts";
+import { CursorProvider, type CursorProbe, type CursorProbeResult } from "../src/acp/cursor.ts";
 import { GrokProvider } from "../src/acp/grok.ts";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -73,6 +73,70 @@ test("model arguments are passed only through documented provider capabilities",
   assert.throws(
     () => new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "--always-approve" }),
     /cannot be interpreted as a CLI flag/,
+  );
+});
+
+class FixtureCursorProbe implements CursorProbe {
+  calls: Array<{ executable: string; args: string[] }> = [];
+  private readonly fixtures: Record<string, CursorProbeResult>;
+
+  constructor(fixtures: Record<string, CursorProbeResult>) {
+    this.fixtures = fixtures;
+  }
+
+  run(executable: string, args: string[]): CursorProbeResult {
+    this.calls.push({ executable, args });
+    return this.fixtures[`${executable} ${args.join(" ")}`] ?? {
+      status: null,
+      error: new Error("not found"),
+    };
+  }
+}
+
+test("Cursor discovery selects cursor and its plausible ACP prefix", () => {
+  const probe = new FixtureCursorProbe({
+    "cursor --version": { status: 0, stdout: "Cursor 1.2.3\n" },
+    "cursor acp --help": { status: 1, stderr: "unknown command" },
+    "cursor agent acp --help": { status: 0, stdout: "Usage: cursor agent acp\n" },
+  });
+  const provider = new CursorProvider(probe);
+  const discovery = provider.discover();
+  assert.equal(discovery.available, true);
+  assert.equal(discovery.executable, "cursor");
+  assert.match(discovery.note ?? "", /cursor agent acp/);
+  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["agent", "acp"]);
+  assert.equal(provider.executable, "cursor");
+});
+
+test("Cursor discovery falls back from banned cursor to cursor-agent", () => {
+  const probe = new FixtureCursorProbe({
+    "cursor-agent --version": { status: 0, stdout: "Cursor Agent 1.2.3\n" },
+    "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
+  });
+  const discovery = new CursorProvider(probe).discover();
+  assert.equal(discovery.available, true);
+  assert.equal(discovery.executable, "cursor-agent");
+  assert.match(discovery.note ?? "", /Tried: cursor, cursor-agent/);
+});
+
+test("Cursor discovery falls back to agent only after higher-priority candidates fail", () => {
+  const probe = new FixtureCursorProbe({
+    "agent --version": { status: 0, stdout: "Agent 1.2.3\n" },
+    "agent acp --help": { status: 0, stdout: "Usage: agent acp\n" },
+  });
+  const provider = new CursorProvider(probe);
+  assert.equal(provider.discover().executable, "agent");
+  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "plan" }), ["acp"]);
+});
+
+test("Cursor discovery reports all tried candidates when no ACP entry is usable", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({}));
+  const discovery = provider.discover();
+  assert.equal(discovery.available, false);
+  assert.match(discovery.note ?? "", /Tried: cursor, cursor-agent, agent/);
+  assert.throws(
+    () => provider.command({ cwd: "/project", prompt: "task", mode: "review" }),
+    /No usable Cursor ACP executable/,
   );
 });
 

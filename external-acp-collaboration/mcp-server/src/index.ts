@@ -95,7 +95,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "external-acp-collaboration", version: "0.1.5" },
+        serverInfo: { name: "external-acp-collaboration", version: "0.1.6" },
         instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending until an approval-prompted, user-confirmed response tool call.",
       };
     case "ping":

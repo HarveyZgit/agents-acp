@@ -207,7 +207,7 @@ export class RunController {
       const initialized = await runtime.peer.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: "external-acp-collaboration", version: "0.1.5" },
+        clientInfo: { name: "external-acp-collaboration", version: "0.1.6" },
       });
       if (!this.isActive(id)) return;
       const authMethod = runtime.provider.authenticationMethod(initialized);

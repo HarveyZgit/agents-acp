@@ -2,7 +2,9 @@
 
 `external-acp-collaboration` is a Codex Desktop plugin that delegates a scoped
 task to a locally installed ACP-capable coding agent. The first adapters target
-Grok Build (`grok agent stdio`) and Cursor CLI (`agent acp`).
+Grok Build (`grok agent stdio`) and Cursor CLI. Cursor discovery tries
+`cursor`, then `cursor-agent`, then `agent`, selecting only a binary whose
+version and ACP help probe succeed.
 
 ## Architecture
 
@@ -66,12 +68,18 @@ or start a provider task solely for verification:
 
 ```bash
 node --version
+cursor --version
+cursor-agent --version
 agent --version
-agent --help
 grok --version
 grok --help
 grok agent --help
 ```
+
+Not every Cursor executable needs to be present: the provider uses the priority
+`cursor` → `cursor-agent` → `agent` and records its resolved ACP launch prefix
+in `list_external_agent_providers`. For `cursor`, it probes `cursor acp` and
+`cursor agent acp`; the selected form is reused for start and resume.
 
 Confirm existing provider authentication using each provider's documented local
 status/login help without exposing tokens. Cursor ACP uses the advertised
