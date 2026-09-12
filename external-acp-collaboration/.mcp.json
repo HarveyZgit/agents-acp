@@ -1,10 +1,54 @@
 {
-  "mcp_servers": {
+  "mcpServers": {
     "agents-acp": {
       "command": "node",
       "args": [
         "--experimental-strip-types",
         "./mcp-server/src/index.ts"
+      ],
+      "cwd": ".",
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 120,
+      "env_vars": [
+        "AGENTS_ACP_CONFIG",
+        "EXTERNAL_ACP_WORKSPACE",
+        "EXTERNAL_ACP_ALLOWED_SUBTREES",
+        "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
+        "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
+        "EXTERNAL_ACP_MAX_RUN_MS",
+        "EXTERNAL_ACP_IDLE_TIMEOUT_MS",
+        "EXTERNAL_ACP_STORE_PATH",
+        "EXTERNAL_ACP_ENV_MODE",
+        "EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH",
+        "EXTERNAL_ACP_ENABLE_FAKE",
+        "HOME",
+        "PATH",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+        "SSH_AUTH_SOCK",
+        "SECURITYSESSIONID",
+        "XPC_SERVICE_NAME",
+        "XPC_FLAGS",
+        "__CF_USER_TEXT_ENCODING",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "CURSOR_API_KEY",
+        "CURSOR_AUTH_TOKEN",
+        "CURSOR_CONFIG_DIR",
+        "XAI_API_KEY",
+        "GROK_CONFIG_DIR"
       ]
     }
   }

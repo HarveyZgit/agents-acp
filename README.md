@@ -1,136 +1,143 @@
 # agents-acp
 
-`agents-acp` is a Codex Desktop plugin that delegates a scoped
-task to a locally installed ACP-capable coding agent. The first adapters target
-Grok Build (`grok agent stdio`) and Cursor CLI. Cursor uses only the official
-`cursor-agent acp` entry point; it never invokes `cursor` or the banned
-`agent` executable.
+`agents-acp` is a Codex plugin that delegates a scoped task to a locally
+installed ACP-capable coding agent. The adapters target Grok Build
+(`grok agent stdio`) and Cursor CLI (`cursor-agent acp`).
+
+Cursor uses only the official `cursor-agent` binary. It never invokes `cursor`
+(the desktop launcher on many machines) and never invokes a bare `agent`,
+whose name collides with other vendors' CLIs and is blocked on some machines.
 
 ## Architecture
 
-The plugin exposes the `agents-acp` local stdio MCP server to Codex. That server starts a
-provider using argument arrays (never a shell command), speaks newline-delimited
-JSON-RPC ACP over stdio, and normalizes provider output into `started`, `text`,
-`activity`, `permission`, `file_change`, `error`, and `completed` events.
+The plugin exposes the `agents-acp` local stdio MCP server to Codex. That
+server starts a provider using argument arrays (never a shell command), speaks
+newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
+`started`, `text`, `activity`, `permission`, `file_change`, `error`, and
+`completed` events.
 
 `external-acp-collaboration/mcp-server/src/acp/provider.ts` owns shared ACP
 transport and lifecycle behavior. `cursor.ts` and `grok.ts` contain only
 provider-specific executable, authentication, model, and launch details.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
-and changed-file summaries. It intentionally never writes task prompts,
-credentials, or streamed text to disk; streamed text remains in memory while
-the MCP server is running.
+and changed-file summaries. It never writes task prompts, credentials, or
+streamed text to disk; streamed text stays in memory while the server runs.
 
-Policy is enforced before launch:
+### Tools
 
-- `review` and `plan` are read-only scheduling modes and can run in parallel.
-- `implement` maps to the provider's `agent` mode, requires
-  `allowImplement: true` plus a local unsandboxed-write opt-in, and is
-  serialized per configured workspace.
-- `cwd` must be the configured active workspace or an explicitly authorized
-  subtree. Real paths are checked, so symlinks cannot escape the workspace.
-- Read-only and write modes fail closed unless the provider advertises and
-  accepts the corresponding ACP session mode.
-- ACP permissions are never approved automatically. The single-use response
-  tool requires the caller to assert an explicit user decision and should
-  remain approval-prompted in Codex; it is disabled unless
-  `EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1` is configured.
+| Tool | Purpose |
+| --- | --- |
+| `list_providers` | Discovered providers, resolved ACP command, and config path |
+| `start` | Start a `review`, `plan`, or `implement` run |
+| `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |
+| `result` | Final text, `stopReason`, changed files, verification advice |
+| `cancel` | ACP cancel notification plus process-group termination |
+| `resume` | Resume a stored provider session via `session/load` |
+| `respond_permission` | Answer a pending permission with one offered `optionId` |
+| `respond_question` | Answer or skip a Cursor multiple-choice question |
+| `respond_plan` | Accept or reject a Cursor plan approval |
 
-Model selection is intentionally provider-specific. Grok Build's documented
-ACP startup flag supports `--model`; Cursor's documented ACP interface
-does not document a model parameter, so the Cursor adapter rejects `model`
-instead of adding it to task text.
+### Protocol behavior
 
-Cursor ACP follows the documented lifecycle: `initialize`, `authenticate` with
-`cursor_login` when required, `session/new` (or `session/load`), then
-`session/prompt`. Because `cursor-agent` commonly uses its existing local
-login, agents-acp first attempts session creation and only uses a non-terminal
-advertised `cursor_login` method when session creation requires it. `review` requests Cursor's `ask` mode, `plan` requests
-`plan`, and `implement` requests `agent`. If a read-only mode is not
-advertised, the run continues using the provider default and records that
-activity; `implement` still fails without an advertised `agent` mode.
+- Authentication follows ACP: after `initialize`, `session/new` is attempted
+  first for pre-authenticated CLIs. Only an `auth_required` (`-32000`) response
+  triggers `authenticate`, and only with an advertised non-terminal method.
+  Auth descriptors are read from either `methodId` or `id`. A terminal-only
+  method is never sent to `authenticate`; the run reports that the user must
+  run `cursor-agent login`.
+- Modes are read from the ACP `SessionModeState` object
+  (`modes.availableModes` / `modes.currentModeId`), with a fallback to
+  `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,
+  `plan` requires `plan` or `ask`, and `implement` requires `agent`. If no
+  acceptable mode can be confirmed, the run **fails closed** rather than
+  running a read-only request in a write-capable default mode.
+- `session/prompt` has no fixed request timeout. A prompt turn is bounded by
+  the overall run budget and an idle watchdog that resets on provider output
+  and pauses while a user decision is pending. Short timeouts remain on
+  `initialize`, `authenticate`, `session/new`, mode selection, and cancel.
+- Permission requests relay the provider's offered `PermissionOption` IDs; the
+  caller must choose one of them. Cancelling answers pending requests with
+  `{ outcome: { outcome: "cancelled" } }`.
+- `session/cancel` is sent as a notification, per ACP, then the provider's
+  process group is terminated.
+- Changed files come from `tool_call` diff content, plus `locations` only for
+  writing tool kinds (`edit`, `delete`, `move`).
+- Only `stopReason: "end_turn"` is success. `refusal`, `max_tokens`, and
+  `max_turn_requests` are reported as failures with the reason retained.
 
-## Linux Codex installation
+### Safety
 
-Use the detailed, versioned commands in [INSTALL.md](INSTALL.md). In short,
-clone this repository, configure the workspace boundary in the environment
-that launches Codex, and add the repository as a documented local marketplace:
+- `cwd` must be the configured workspace or an explicitly authorized subtree.
+  Real paths are resolved, so symlinks cannot escape the workspace.
+- `review` and `plan` are read-only and may run in parallel; `implement`
+  requires `allowImplement: true` plus a local unsandboxed-write opt-in and is
+  serialized per workspace.
+- Responses are disabled unless the operator enables them, and every response
+  tool requires `userConfirmed: true`. Keep them approval-prompted in Codex.
+- Provider children receive an auditable environment allowlist (base session
+  variables, macOS/login session variables, proxy and TLS settings, plus
+  `CURSOR_*` / `XAI_*` / `GROK_*`). `envMode: "inherit"` is an explicit escape
+  hatch and `"minimal"` is the strictest option. Values are never logged.
+- Failures expose a bounded, sanitized diagnostic with the ACP stage, JSON-RPC
+  or process code, advertised auth-method IDs/types, and a stderr tail. Prompt
+  text, token-like values, and paths outside the workspace are redacted.
+
+Model selection stays provider-specific. Grok Build's documented ACP startup
+flag supports `--model`; Cursor's documented ACP entry point defines no model
+parameter, so the Cursor adapter rejects `model` instead of faking it in text.
+
+## Installation
+
+Follow [INSTALL.md](INSTALL.md) for the exact commands. Codex launches bundled
+MCP servers itself and does not pass along your shell environment, so
+configuration comes from a config file first:
 
 ```bash
-export EXTERNAL_ACP_WORKSPACE=/absolute/path/to/project
+mkdir -p ~/.codex/agents-acp
+cat > ~/.codex/agents-acp/config.json <<'JSON'
+{
+  "workspace": "/absolute/path/to/project",
+  "enablePermissionResponses": true
+}
+JSON
 codex plugin marketplace add /absolute/path/to/agents-acp
 ```
 
-The `.mcp.json` file follows the current documented Codex bundled-MCP
-`mcp_servers` shape. It exposes structured tool responses and an
-`agents-acp://runs/{runId}` HTML resource. It does not declare a Codex custom
-app panel: the current documented manifest only supports `.app.json` for a
-registered MCP server mapping, not a generic embedded plugin UI. Wiring
-`ui/run-panel/run-panel.ts` into a native expandable desktop panel therefore
-requires a future documented Codex plugin UI/runtime surface.
+Any `EXTERNAL_ACP_*` variable listed in the plugin's `.mcp.json` `env_vars`
+overrides the corresponding config file value when Codex forwards it.
 
-## Local verification checklist
+The plugin exposes structured tool results and an `agents-acp://runs/{runId}`
+HTML resource. It declares no Codex custom app panel: the documented manifest
+supports `.app.json` only for a registered MCP server mapping, not a generic
+embedded plugin UI, so `ui/run-panel/run-panel.ts` still needs a future
+documented Codex plugin UI surface.
 
-Do these read-only checks on the target machine; do not install, authenticate,
-or start a provider task solely for verification:
+## Local verification
 
 ```bash
 node --version
 cursor-agent --version
 cursor-agent acp --help
+cursor-agent status
 grok --version
-grok --help
 grok agent --help
-```
 
-The Cursor provider probes only `cursor-agent --version` and
-`cursor-agent acp --help`, then records `cursor-agent acp` in
-`list_providers`. That resolved command is reused for start and
-resume, preventing a fallback to a conflicting `cursor` or `agent` binary.
-
-Failures surface a bounded, sanitized `error` plus its lifecycle `stage` in
-both `status` and `result`. JSON-RPC error codes, process error/exit codes,
-and advertised authentication method IDs/types are retained; prompt text,
-token-like values, and paths outside the workspace are redacted.
-
-Cursor ACP inherits the environment of the Codex process by default, matching
-the interactive Cursor CLI behavior needed for macOS login/keychain context.
-Start Codex from the same user session where `cursor-agent status` succeeds.
-Set `EXTERNAL_ACP_ENV_MODE=allowlist` only when that restricted behavior is
-intentional. Sanitized stderr tails are exposed as `diagnostic` while a run is
-active and included in a terminal failure; stderr is never logged to disk.
-
-Confirm existing provider authentication using each provider's documented local
-status/login help without exposing tokens. Cursor ACP uses the advertised
-`cursor_login` method; Grok ACP uses an existing cached login token or a
-pre-existing `XAI_API_KEY` environment credential. This plugin does not ask
-for, save, or log either credential.
-
-Then run the dependency-free mocked tests:
-
-```bash
 cd external-acp-collaboration/mcp-server
 npm test
+npm run smoke:main
 ```
 
-Finally, in Codex, call `list_providers`, start a harmless
-`review` or `plan` run, and verify status/result tools and the resource. If a
-permission is requested, select `allow-once` or `reject-once` yourself and
-call `respond_permission` with `userConfirmed: true`. Test
-`implement` only in a disposable workspace after the two explicit opt-ins
-documented in `INSTALL.md`.
+`npm run smoke:main` exercises the full MCP flow against a bundled fake ACP
+agent that speaks documented ACP shapes. It needs no Codex login and no Cursor
+or Grok binaries.
 
 ## Verification boundaries
 
-The repository tests mock the ACP JSON-RPC lifecycle; they do not install
-Grok Build or Cursor CLI, authenticate either provider, or exercise Codex
-Desktop. Those integrations must be verified on the user's machine.
+The tests and smoke run against mocks and the bundled fake agent. They do not
+install Grok Build or Cursor CLI, authenticate either provider, or exercise
+Codex itself. Real provider and real Codex verification remain the user's
+local step.
 
-The bundled fake ACP provider is available only when
-`EXTERNAL_ACP_ENABLE_FAKE=1` is set. It exists solely for the deterministic
-main-flow smoke test; it is not enabled in normal installations.
-
-The prior referenced scratch branch was not readable from this repository's
-remote, so this implementation was created from the design and current public
-provider/plugin documentation.
+The bundled fake provider is registered only when it is explicitly enabled in
+config or environment; it is not available in a normal installation.

@@ -1,40 +1,41 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
 const serverRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const workspace = mkdtempSync(join(tmpdir(), "external-acp-smoke-workspace-"));
-const dataHome = mkdtempSync(join(tmpdir(), "external-acp-smoke-home-"));
+const workspace = mkdtempSync(join(tmpdir(), "agents-acp-smoke-workspace-"));
+const dataHome = mkdtempSync(join(tmpdir(), "agents-acp-smoke-home-"));
+const configPath = join(dataHome, "config.json");
+
+// The config file is the primary configuration surface, exactly as an
+// installed plugin would use it when Codex forwards no environment variables.
+writeFileSync(configPath, JSON.stringify({
+  workspace,
+  enablePermissionResponses: true,
+  enableFake: true,
+  storePath: join(dataHome, "runs.json"),
+}));
+
 const child = spawn(process.execPath, ["--experimental-strip-types", "src/index.ts"], {
   cwd: serverRoot,
-  env: {
-    PATH: process.env.PATH,
-    HOME: dataHome,
-    EXTERNAL_ACP_WORKSPACE: workspace,
-    EXTERNAL_ACP_ENABLE_FAKE: "1",
-    EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES: "1",
-  },
+  env: { PATH: process.env.PATH, HOME: dataHome, AGENTS_ACP_CONFIG: configPath },
   stdio: ["pipe", "pipe", "pipe"],
 });
 
 const pending = new Map();
 let nextId = 1;
-const output = [];
 const errors = [];
 const lines = readline.createInterface({ input: child.stdout });
 lines.on("line", (line) => {
   const message = JSON.parse(line);
   const deferred = pending.get(message.id);
-  if (deferred) {
-    pending.delete(message.id);
-    message.error ? deferred.reject(new Error(message.error.message)) : deferred.resolve(message.result);
-  } else {
-    output.push(message);
-  }
+  if (!deferred) return;
+  pending.delete(message.id);
+  message.error ? deferred.reject(new Error(message.error.message)) : deferred.resolve(message.result);
 });
 child.stderr.on("data", (chunk) => errors.push(String(chunk)));
 
@@ -46,14 +47,23 @@ function request(method, params = {}) {
 
 async function call(name, args) {
   const result = await request("tools/call", { name, arguments: args });
-  assert.equal(result.isError, undefined, `${name} failed: ${result.content?.[0]?.text}`);
+  assert.equal(result.isError, undefined, `${name} failed: ${result.content?.[0]?.text} ${errors.join("")}`);
   return JSON.parse(result.content[0].text);
 }
 
+async function callExpectingError(name, args) {
+  const result = await request("tools/call", { name, arguments: args });
+  assert.equal(result.isError, true, `${name} unexpectedly succeeded`);
+  return JSON.parse(result.content[0].text).error;
+}
+
 async function waitFor(runId, expected) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     const status = await call("status", { runId });
     if (status.status === expected) return status;
+    if (["failed", "completed", "cancelled"].includes(status.status) && status.status !== expected) {
+      throw new Error(`Run ${runId} reached ${status.status} instead of ${expected}: ${status.error ?? ""}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Run ${runId} did not reach ${expected}. stderr: ${errors.join("")}`);
@@ -62,43 +72,58 @@ async function waitFor(runId, expected) {
 try {
   await request("initialize", {});
   const tools = await request("tools/list", {});
-  assert.ok(tools.tools.some((tool) => tool.name === "respond_permission"));
+  const toolNames = tools.tools.map((tool) => tool.name);
+  for (const expected of ["list_providers", "start", "status", "cancel", "resume", "result", "respond_permission"]) {
+    assert.ok(toolNames.includes(expected), `missing tool ${expected}`);
+  }
 
-  const providers = await call("list_providers", {});
-  assert.ok(providers.some((provider) => provider.provider === "fake" && provider.available));
+  const discovery = await call("list_providers", {});
+  assert.equal(discovery.configLoaded, true);
+  assert.ok(discovery.providers.some((provider) => provider.provider === "fake" && provider.available));
 
+  // Read-only review must negotiate a read-only ACP mode, not the default agent mode.
   const first = await call("start", {
     provider: "fake",
     cwd: workspace,
     prompt: "Exercise the deterministic ACP smoke flow.",
-    mode: "plan",
+    mode: "review",
   });
   const waiting = await waitFor(first.id, "waiting_permission");
   assert.ok(waiting.liveEvents.some((event) => event.type === "text"));
-  assert.ok(waiting.liveEvents.some((event) => event.type === "activity"));
-  assert.ok(waiting.liveEvents.some((event) => event.type === "file_change"));
-  assert.deepEqual(waiting.pendingRequests, ["rpc-900"]);
+  assert.ok(waiting.liveEvents.some((event) => event.type === "activity" && /selected ask/.test(event.label ?? "")));
+  assert.ok(waiting.liveEvents.some((event) => event.type === "file_change" && event.path === "fake-output.txt"));
+  assert.equal(waiting.pendingRequests.length, 1);
+  const [permission] = waiting.pendingRequests;
+  assert.equal(permission.kind, "permission");
+  assert.deepEqual(permission.options.map((option) => option.optionId), ["allow-once", "reject-once"]);
+
+  const rejected = await callExpectingError("respond_permission", {
+    runId: first.id,
+    requestId: permission.requestId,
+    optionId: "not-offered",
+    userConfirmed: true,
+  });
+  assert.match(rejected, /must be one of the offered options/);
 
   await call("respond_permission", {
     runId: first.id,
-    requestId: "rpc-900",
-    decision: "allow-once",
+    requestId: permission.requestId,
+    optionId: "allow-once",
     userConfirmed: true,
   });
   await waitFor(first.id, "completed");
   const completed = await call("result", { runId: first.id });
+  assert.equal(completed.stopReason, "end_turn");
   assert.match(completed.summary, /Fake ACP/);
   assert.deepEqual(completed.changedFiles, [{ path: "fake-output.txt", kind: "modify" }]);
 
-  const resumed = await call("resume", {
-    runId: first.id,
-    followUp: "Resume the fake session.",
-  });
+  // Resume uses session/load, which may return a null result.
+  const resumed = await call("resume", { runId: first.id, followUp: "Resume the fake session." });
   const resumedWaiting = await waitFor(resumed.id, "waiting_permission");
   await call("respond_permission", {
     runId: resumed.id,
-    requestId: resumedWaiting.pendingRequests[0],
-    decision: "reject-once",
+    requestId: resumedWaiting.pendingRequests[0].requestId,
+    optionId: "reject-once",
     userConfirmed: true,
   });
   await waitFor(resumed.id, "completed");
@@ -107,13 +132,23 @@ try {
     provider: "fake",
     cwd: workspace,
     prompt: "Start a cancellable fake run.",
-    mode: "review",
+    mode: "plan",
   });
   await waitFor(cancellable.id, "waiting_permission");
   const cancelled = await call("cancel", { runId: cancellable.id });
   assert.equal(cancelled.status, "cancelled");
 
-  console.log("PASS: bundled fake ACP main flow completed (start, permission, response, result, resume, cancel).");
+  // Implement must stay blocked without the explicit local opt-in.
+  const blocked = await callExpectingError("start", {
+    provider: "fake",
+    cwd: workspace,
+    prompt: "Attempt a write run.",
+    mode: "implement",
+    allowImplement: true,
+  });
+  assert.match(blocked, /ALLOW_UNSANDBOXED_IMPLEMENT/);
+
+  console.log("PASS: agents-acp main flow (providers, review mode negotiation, streaming, permission options, result, resume, cancel, implement gate).");
 } finally {
   lines.close();
   child.kill();

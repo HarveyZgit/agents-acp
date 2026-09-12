@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AcpProvider,
   baseEnvironment,
   JsonRpcPeer,
   normalizeAcpEvent,
+  providerEnvironment,
+  readSessionModes,
+  type AuthMethod,
   type LineTransport,
   type ProviderCapabilities,
   type ProviderName,
@@ -15,12 +21,10 @@ import { WorkspacePolicy } from "../src/policy.ts";
 import { RunStore } from "../src/run-store.ts";
 import { CursorProvider, type CursorProbe, type CursorProbeResult } from "../src/acp/cursor.ts";
 import { GrokProvider } from "../src/acp/grok.ts";
-import { join } from "node:path";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 
 class FakeTransport implements LineTransport {
   writes: string[] = [];
+  terminated = false;
   private lines: Array<(line: string) => void> = [];
   private stderr: Array<(chunk: string) => void> = [];
   private exits: Array<(code: number | null) => void> = [];
@@ -38,6 +42,8 @@ class FakeTransport implements LineTransport {
     this.exits.push(listener);
   }
   terminate(): void {
+    if (this.terminated) return;
+    this.terminated = true;
     for (const listener of this.exits) listener(0);
   }
   emit(message: unknown): void {
@@ -46,29 +52,113 @@ class FakeTransport implements LineTransport {
   emitStderr(chunk: string): void {
     for (const listener of this.stderr) listener(chunk);
   }
+  sent(method: string): Array<Record<string, unknown>> {
+    return this.writes.map((line) => JSON.parse(line)).filter((message) => message.method === method);
+  }
 }
 
-test("JSON-RPC peer resolves requests and normalizes provider events", async () => {
+test("JSON-RPC peer resolves requests, honors no-timeout turns, and flags invalid envelopes", async () => {
   const transport = new FakeTransport();
   const events: string[] = [];
   const peer = new JsonRpcPeer(transport, (message) => events.push(message.method ?? ""), () => {});
+
   const response = peer.request("initialize", {});
   assert.equal(JSON.parse(transport.writes[0]).method, "initialize");
   transport.emit({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1 } });
   assert.deepEqual(await response, { protocolVersion: 1 });
 
-  const normalized = normalizeAcpEvent("cursor", {
-    method: "session/update",
-    params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "hello" } } },
-  });
-  assert.deepEqual(normalized, [{ type: "text", text: "hello" }]);
-  transport.emit({ jsonrpc: "2.0", method: "cursor/update_todos", params: {} });
+  // An open-ended prompt turn must not be killed by a default request timeout.
+  const openEnded = peer.request("session/prompt", {}, 0);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  transport.emit({ jsonrpc: "2.0", id: 2, result: { stopReason: "end_turn" } });
+  assert.deepEqual(await openEnded, { stopReason: "end_turn" });
+
+  peer.notify("session/cancel", { sessionId: "s1" });
+  assert.equal(transport.sent("session/cancel").length, 1);
+  assert.equal(JSON.parse(transport.writes.at(-1) as string).id, undefined);
+
   transport.emit(null);
-  assert.deepEqual(events, ["cursor/update_todos", "acp/invalid_message"]);
+  assert.deepEqual(events, ["acp/invalid_message"]);
+});
+
+test("session update normalization derives changed files from tool call diffs and locations", () => {
+  assert.deepEqual(
+    normalizeAcpEvent("cursor", {
+      method: "session/update",
+      params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } },
+    }),
+    [{ type: "text", text: "hello" }],
+  );
+
+  const toolCall = normalizeAcpEvent("cursor", {
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call",
+        kind: "edit",
+        locations: [{ path: "src/touched.ts" }],
+        content: [
+          { type: "diff", path: "src/created.ts", oldText: null, newText: "next" },
+          { type: "diff", path: "src/removed.ts", oldText: "prior", newText: null },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(toolCall, [
+    { type: "activity", label: "Agent reported tool activity" },
+    { type: "file_change", path: "src/created.ts", kind: "create" },
+    { type: "file_change", path: "src/removed.ts", kind: "delete" },
+    { type: "file_change", path: "src/touched.ts", kind: "modify" },
+  ]);
+
+  // A read-only tool call must not be reported as a file change.
+  assert.deepEqual(
+    normalizeAcpEvent("cursor", {
+      method: "session/update",
+      params: { update: { sessionUpdate: "tool_call", kind: "read", locations: [{ path: "src/read.ts" }] } },
+    }),
+    [{ type: "activity", label: "Agent reported tool activity" }],
+  );
+});
+
+test("permission requests relay offered option IDs and Cursor extensions stay distinct", () => {
+  const [permission] = normalizeAcpEvent("cursor", {
+    id: 7,
+    method: "session/request_permission",
+    params: { options: [{ optionId: "allow-once", name: "Allow", kind: "allow_once" }] },
+  });
+  assert.deepEqual(permission, {
+    type: "permission",
+    requestId: "rpc-7",
+    description: "Agent requested permission to continue.",
+    kind: "permission",
+    options: [{ optionId: "allow-once", name: "Allow", kind: "allow_once" }],
+  });
+
+  const [question] = normalizeAcpEvent("cursor", { id: 8, method: "cursor/ask_question", params: {} });
+  const [plan] = normalizeAcpEvent("cursor", { id: 9, method: "cursor/create_plan", params: {} });
+  assert.equal(question.type === "permission" && question.kind, "question");
+  assert.equal(plan.type === "permission" && plan.kind, "plan");
+});
+
+test("session modes are read from the ACP SessionModeState object", () => {
+  assert.deepEqual(
+    readSessionModes({
+      modes: { currentModeId: "agent", availableModes: [{ id: "ask" }, { id: "plan" }, { id: "agent" }] },
+    }),
+    { availableModes: ["ask", "plan", "agent"], currentModeId: "agent" },
+  );
+  assert.deepEqual(
+    readSessionModes({
+      configOptions: [{ configId: "mode", category: "mode", currentValue: "code", options: [{ value: "ask" }, { value: "code" }] }],
+    }),
+    { availableModes: ["ask", "code"], currentModeId: "code", configOptionId: "mode" },
+  );
+  assert.deepEqual(readSessionModes({}), { availableModes: [] });
 });
 
 test("model arguments are passed only through documented provider capabilities", () => {
-  const cursor = new CursorProvider();
+  const cursor = new CursorProvider(new FixtureCursorProbe({}));
   assert.throws(
     () => cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "model-x" }),
     /Model selection unavailable/,
@@ -93,10 +183,7 @@ class FixtureCursorProbe implements CursorProbe {
 
   run(executable: string, args: string[]): CursorProbeResult {
     this.calls.push({ executable, args });
-    return this.fixtures[`${executable} ${args.join(" ")}`] ?? {
-      status: null,
-      error: new Error("not found"),
-    };
+    return this.fixtures[`${executable} ${args.join(" ")}`] ?? { status: null, error: new Error("not found") };
   }
 }
 
@@ -111,33 +198,25 @@ test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   assert.equal(discovery.executable, "cursor-agent");
   assert.match(discovery.note ?? "", /cursor-agent acp/);
   assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
-  assert.deepEqual(probe.calls.map((call) => call.executable), ["cursor-agent", "cursor-agent"]);
 });
 
 test("Cursor discovery does not fall back to cursor or agent", () => {
   const probe = new FixtureCursorProbe({
     "cursor --version": { status: 0, stdout: "unrelated cursor\n" },
     "cursor acp --help": { status: 0, stdout: "acp\n" },
-    "agent --version": { status: 0, stdout: "blocked agent\n" },
+    "agent --version": { status: 0, stdout: "colliding agent\n" },
     "agent acp --help": { status: 0, stdout: "acp\n" },
   });
   const provider = new CursorProvider(probe);
   assert.equal(provider.discover().available, false);
   assert.deepEqual(probe.calls, [{ executable: "cursor-agent", args: ["--version"] }]);
-});
-
-test("Cursor discovery reports cursor-agent clearly when its ACP entry is unusable", () => {
-  const provider = new CursorProvider(new FixtureCursorProbe({}));
-  const discovery = provider.discover();
-  assert.equal(discovery.available, false);
-  assert.match(discovery.note ?? "", /cursor-agent was not found/);
   assert.throws(
     () => provider.command({ cwd: "/project", prompt: "task", mode: "review" }),
     /intentionally does not fall back/,
   );
 });
 
-test("Cursor authentication accepts methodId and never authenticates terminal methods", () => {
+test("Cursor auth descriptors accept methodId or id and keep the terminal type", () => {
   const provider = new CursorProvider(new FixtureCursorProbe({}));
   assert.deepEqual(
     provider.authenticationMethod({ authMethods: [{ methodId: "cursor_login" }] }),
@@ -147,40 +226,49 @@ test("Cursor authentication accepts methodId and never authenticates terminal me
     provider.authenticationMethod({ authMethods: [{ id: "cursor_login", type: "terminal" }] }),
     { methodId: "cursor_login", type: "terminal" },
   );
+  assert.equal(provider.authenticationMethod({ authMethods: [] }), undefined);
 });
 
-test("Cursor ACP inherits the launcher environment by default", () => {
-  class InspectableCursorProvider extends CursorProvider {
-    inspectEnvironment(): NodeJS.ProcessEnv {
-      return this.environment();
-    }
-  }
-  const priorMode = process.env.EXTERNAL_ACP_ENV_MODE;
-  const priorMarker = process.env.CURSOR_SESSION_MARKER;
-  process.env.CURSOR_SESSION_MARKER = "available-to-cursor";
-  try {
-    const provider = new InspectableCursorProvider(new FixtureCursorProbe({}));
-    assert.equal(provider.inspectEnvironment().CURSOR_SESSION_MARKER, "available-to-cursor");
-    process.env.EXTERNAL_ACP_ENV_MODE = "allowlist";
-    assert.equal(provider.inspectEnvironment().CURSOR_SESSION_MARKER, undefined);
-  } finally {
-    if (priorMode === undefined) delete process.env.EXTERNAL_ACP_ENV_MODE;
-    else process.env.EXTERNAL_ACP_ENV_MODE = priorMode;
-    if (priorMarker === undefined) delete process.env.CURSOR_SESSION_MARKER;
-    else process.env.CURSOR_SESSION_MARKER = priorMarker;
-  }
-});
-
-test("provider environment is allowlisted and does not inherit unrelated secrets", () => {
-  const previous = process.env.UNRELATED_TEST_SECRET;
+test("provider environment is an auditable allowlist with an explicit inherit escape hatch", () => {
+  const previousMarker = process.env.CURSOR_SESSION_MARKER;
+  const previousSecret = process.env.UNRELATED_TEST_SECRET;
+  process.env.CURSOR_SESSION_MARKER = "cursor-scoped";
   process.env.UNRELATED_TEST_SECRET = "do-not-forward";
   try {
+    const options: StartOptions = { cwd: "/project", prompt: "task", mode: "review", envMode: "session" };
+    const session = providerEnvironment(options, ["CURSOR_"], ["CURSOR_API_KEY"]);
+    assert.equal(session.CURSOR_SESSION_MARKER, "cursor-scoped");
+    assert.equal(session.UNRELATED_TEST_SECRET, undefined);
+    assert.equal(session.PATH, process.env.PATH);
+
+    const minimal = providerEnvironment({ ...options, envMode: "minimal" }, ["CURSOR_"]);
+    assert.equal(minimal.CURSOR_SESSION_MARKER, undefined);
+
+    const inherited = providerEnvironment({ ...options, envMode: "inherit" }, ["CURSOR_"]);
+    assert.equal(inherited.UNRELATED_TEST_SECRET, "do-not-forward");
     assert.equal(baseEnvironment().UNRELATED_TEST_SECRET, undefined);
   } finally {
-    if (previous === undefined) delete process.env.UNRELATED_TEST_SECRET;
-    else process.env.UNRELATED_TEST_SECRET = previous;
+    restore("CURSOR_SESSION_MARKER", previousMarker);
+    restore("UNRELATED_TEST_SECRET", previousSecret);
   }
 });
+
+function restore(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+type MockOptions = {
+  authMethods?: unknown[];
+  requireAuth?: boolean;
+  modes?: unknown;
+  stopReason?: string;
+  completeBeforePermission?: boolean;
+  rejectedMethod?: string;
+  rejectionMessage?: string;
+  stderrOnRejected?: string;
+  loadSession?: boolean;
+};
 
 class MockProvider extends AcpProvider {
   readonly name: ProviderName = "grok";
@@ -191,250 +279,316 @@ class MockProvider extends AcpProvider {
     supportedModes: ["ask", "plan", "agent"],
   };
   readonly transport = new FakeTransport();
-  private permissionRequested = false;
-  private readonly completeBeforePermission: boolean;
-  private readonly withoutModes: boolean;
-  private readonly rejectedMethod?: string;
-  private readonly rejectionMessage?: string;
-  private readonly sessionFirstFails: boolean;
-  private readonly authenticationInvalidParams: boolean;
-  private readonly authMethods: unknown[];
-  private readonly stderrOnRejected?: string;
-  private sessionAttempts = 0;
+  private readonly options: MockOptions;
+  private authenticated: boolean;
+  private promptId: number | string | undefined;
 
-  constructor(options: {
-    completeBeforePermission?: boolean;
-    withoutModes?: boolean;
-    rejectedMethod?: string;
-    rejectionMessage?: string;
-    sessionFirstFails?: boolean;
-    authenticationInvalidParams?: boolean;
-    authMethods?: unknown[];
-    stderrOnRejected?: string;
-  } = {}) {
+  constructor(options: MockOptions = {}) {
     super();
-    this.completeBeforePermission = options.completeBeforePermission ?? false;
-    this.withoutModes = options.withoutModes ?? false;
-    this.rejectedMethod = options.rejectedMethod;
-    this.rejectionMessage = options.rejectionMessage;
-    this.sessionFirstFails = options.sessionFirstFails ?? false;
-    this.authenticationInvalidParams = options.authenticationInvalidParams ?? false;
-    this.authMethods = options.authMethods ?? [{ id: "cached_token" }];
-    this.stderrOnRejected = options.stderrOnRejected;
+    this.options = options;
+    this.authenticated = options.requireAuth !== true;
   }
 
-  command(_options: StartOptions): string[] {
+  command(): string[] {
     return ["agent", "stdio"];
   }
-  authenticationMethod(initialized: Record<string, unknown>) {
-    return Array.isArray(initialized.authMethods)
-      && initialized.authMethods.some((method) => (
-        typeof method === "object" && method !== null && (method as { id?: string }).id === "cached_token"
-      ))
-      ? { methodId: "cached_token" }
-      : undefined;
+
+  authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
+    const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
+    const first = methods[0];
+    if (!first || typeof first !== "object") return undefined;
+    const descriptor = first as { methodId?: unknown; id?: unknown; type?: unknown };
+    const methodId = typeof descriptor.methodId === "string"
+      ? descriptor.methodId
+      : typeof descriptor.id === "string" ? descriptor.id : undefined;
+    return methodId ? { methodId, type: typeof descriptor.type === "string" ? descriptor.type : undefined } : undefined;
   }
+
+  prefersSessionBeforeAuthentication(): boolean {
+    return true;
+  }
+
   createTransport(): LineTransport {
-    const originalWrite = this.transport.write.bind(this.transport);
+    const write = this.transport.write.bind(this.transport);
     this.transport.write = (line) => {
-      originalWrite(line);
+      write(line);
       const message = JSON.parse(line);
-      if (!message.method) {
-        if (message.id === 90 && !this.permissionRequested) {
-          this.permissionRequested = true;
-          this.transport.emit({ jsonrpc: "2.0", id: 4, result: { stopReason: "end_turn" } });
-        }
-        return;
-      }
-      const results: Record<string, unknown> = {
-        initialize: { authMethods: this.authMethods },
-        authenticate: {},
-        "session/new": this.withoutModes ? { sessionId: "mock-session" } : {
-          sessionId: "mock-session",
-          configOptions: [{
-            id: "mode",
-            category: "mode",
-            options: [{ value: "plan" }],
-          }],
-        },
-        "session/set_config_option": {},
-      };
-      if (message.method === this.rejectedMethod) {
-        if (this.stderrOnRejected) this.transport.emitStderr(this.stderrOnRejected);
-        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.rejectionMessage } });
-        return;
-      }
-      if (message.method === "session/new" && this.sessionFirstFails && this.sessionAttempts++ === 0) {
-        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "authentication required" } });
-        return;
-      }
-      if (message.method === "authenticate" && this.authenticationInvalidParams) {
-        this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "Invalid params" } });
-        return;
-      }
-      if (message.method === "session/prompt") {
-        this.transport.emit({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "mocked answer" } } } });
-        this.transport.emit({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: {} });
-        if (this.completeBeforePermission) {
-          this.transport.emit({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
-        }
-        return;
-      }
-      this.transport.emit({ jsonrpc: "2.0", id: message.id, result: results[message.method] ?? {} });
+      if (!message.method) return;
+      this.handle(message);
     };
     return this.transport;
   }
+
+  private handle(message: { id?: number | string; method: string; params?: Record<string, unknown> }): void {
+    if (message.method === this.options.rejectedMethod) {
+      if (this.options.stderrOnRejected) this.transport.emitStderr(this.options.stderrOnRejected);
+      this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.options.rejectionMessage } });
+      return;
+    }
+    switch (message.method) {
+      case "initialize":
+        this.transport.emit({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            agentCapabilities: { loadSession: this.options.loadSession ?? true },
+            authMethods: this.options.authMethods ?? [{ methodId: "cached_token", type: "agent" }],
+          },
+        });
+        return;
+      case "authenticate":
+        this.authenticated = true;
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, result: {} });
+        return;
+      case "session/new":
+        if (!this.authenticated) {
+          this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "auth_required" } });
+          return;
+        }
+        this.transport.emit({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            sessionId: "mock-session",
+            modes: this.options.modes ?? { currentModeId: "agent", availableModes: [{ id: "ask" }, { id: "plan" }, { id: "agent" }] },
+          },
+        });
+        return;
+      case "session/load":
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, result: null });
+        return;
+      case "session/set_mode":
+      case "session/set_config_option":
+        this.transport.emit({ jsonrpc: "2.0", id: message.id, result: {} });
+        return;
+      case "session/prompt":
+        this.promptId = message.id;
+        this.transport.emit({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "mocked answer" } } },
+        });
+        if (this.options.completeBeforePermission) {
+          this.transport.emit({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: { options: [{ optionId: "allow-once" }] } });
+          this.transport.emit({ jsonrpc: "2.0", id: message.id, result: { stopReason: this.options.stopReason ?? "end_turn" } });
+          return;
+        }
+        if (this.options.stopReason && this.options.stopReason !== "pending") {
+          this.transport.emit({ jsonrpc: "2.0", id: message.id, result: { stopReason: this.options.stopReason } });
+          return;
+        }
+        this.transport.emit({
+          jsonrpc: "2.0",
+          id: 90,
+          method: "session/request_permission",
+          params: { options: [{ optionId: "allow-once", kind: "allow_once" }, { optionId: "reject-once", kind: "reject_once" }] },
+        });
+        return;
+      case "session/cancel":
+        if (this.promptId !== undefined) {
+          this.transport.emit({ jsonrpc: "2.0", id: this.promptId, result: { stopReason: "cancelled" } });
+          this.promptId = undefined;
+        }
+        return;
+      default:
+        return;
+    }
+  }
 }
 
-test("controller leaves permission pending and safely cancels without auto-approval", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  const file = join(workspace, "runs.json");
+function controllerFor(provider: MockProvider, options: { allowImplement?: boolean } = {}) {
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-controller-"));
+  const controller = new RunController(
+    new RunStore(join(workspace, "runs.json")),
+    new WorkspacePolicy(workspace, [], options.allowImplement ?? false),
+    { providers: [provider] },
+  );
+  return { workspace, controller };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+test("permission stays pending with offered options and cancel uses the ACP notification", async () => {
   const provider = new MockProvider();
-  const controller = new RunController(new RunStore(file), new WorkspacePolicy(workspace), [provider]);
+  const { workspace, controller } = controllerFor(provider);
   const run = controller.start({ provider: "grok", cwd: workspace, prompt: "do not persist this", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
+
   const waiting = controller.status(run.id);
   assert.equal(waiting.status, "waiting_permission");
-  assert.deepEqual(waiting.pendingRequests, ["rpc-90"]);
+  assert.deepEqual(waiting.pendingRequests, [{
+    requestId: "rpc-90",
+    kind: "permission",
+    options: [{ optionId: "allow-once", name: undefined, kind: "allow_once" }, { optionId: "reject-once", name: undefined, kind: "reject_once" }],
+  }]);
+  assert.equal(provider.transport.writes.some((line) => JSON.parse(line).id === 90), false);
   assert.throws(
-    () => controller.resume({ runId: run.id, followUp: "continue" }),
-    /Only a completed/,
+    () => controller.respondPermission(run.id, "rpc-90", "not-offered"),
+    /must be one of the offered options/,
   );
 
-  assert.equal(
-    provider.transport.writes.some((line) => JSON.parse(line).id === 90 && !JSON.parse(line).method),
-    false,
-  );
   const cancelled = await controller.cancel(run.id);
   assert.equal(cancelled.status, "cancelled");
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(controller.result(run.id).status, "cancelled");
+  assert.equal(provider.transport.sent("session/cancel").length, 1);
+  // The pending request must be answered as cancelled, not left dangling.
+  const answered = provider.transport.writes.map((line) => JSON.parse(line)).find((message) => message.id === 90);
+  assert.deepEqual(answered.result, { outcome: { outcome: "cancelled" } });
+  assert.equal(provider.transport.terminated, true);
 });
 
-test("controller skips authenticate when no agent auth method is selected", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  const provider = new MockProvider({ authMethods: [] });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(controller.status(run.id).status, "waiting_permission");
-  assert.equal(provider.transport.writes.some((line) => JSON.parse(line).method === "authenticate"), false);
+test("selected permission option is relayed verbatim to the provider", async () => {
+  const provider = new MockProvider();
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  controller.respondPermission(run.id, "rpc-90", "reject-once");
+  const answered = provider.transport.writes.map((line) => JSON.parse(line)).find((message) => message.id === 90);
+  assert.deepEqual(answered.result, { outcome: { outcome: "selected", optionId: "reject-once" } });
   await controller.cancel(run.id);
 });
 
-test("controller does not authenticate terminal auth methods", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  class TerminalAuthProvider extends MockProvider {
-    authenticationMethod() {
-      return { methodId: "open_browser", type: "terminal" };
-    }
-  }
-  const provider = new TerminalAuthProvider();
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+test("auth_required triggers authenticate with a protocol method and retries session/new", async () => {
+  const provider = new MockProvider({ requireAuth: true, authMethods: [{ methodId: "cursor_login", type: "agent" }] });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
   assert.equal(controller.status(run.id).status, "waiting_permission");
-  assert.equal(provider.transport.writes.some((line) => JSON.parse(line).method === "authenticate"), false);
+  assert.equal(provider.transport.sent("authenticate").length, 1);
+  assert.equal(provider.transport.sent("session/new").length, 2);
   await controller.cancel(run.id);
 });
 
-test("pre-authenticated Cursor fallback retries session after authenticate invalid params", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  class PreauthenticatedCursorProvider extends MockProvider {
-    prefersSessionBeforeAuthentication(): boolean {
-      return true;
-    }
-    allowsPreauthenticatedSessionFallback(): boolean {
-      return true;
-    }
-    authenticationMethod() {
-      return { methodId: "cursor_login" };
-    }
-  }
-  const provider = new PreauthenticatedCursorProvider({
-    sessionFirstFails: true,
-    authenticationInvalidParams: true,
-  });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+test("terminal-only auth methods are never sent to authenticate", async () => {
+  const provider = new MockProvider({ requireAuth: true, authMethods: [{ methodId: "cursor_login", type: "terminal" }] });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
   const status = controller.status(run.id);
-  assert.equal(status.status, "waiting_permission");
-  assert.equal(provider.transport.writes.filter((line) => JSON.parse(line).method === "session/new").length, 2);
-  assert.equal(provider.transport.writes.filter((line) => JSON.parse(line).method === "authenticate").length, 1);
+  assert.equal(status.status, "failed");
+  assert.match(String(status.error), /terminal method/);
+  assert.match(String(status.error), /cursor-agent login/);
+  assert.equal(provider.transport.sent("authenticate").length, 0);
+});
+
+test("read-only modes fail closed when no read-only ACP mode is available", async () => {
+  const provider = new MockProvider({ modes: { currentModeId: "agent", availableModes: [{ id: "agent" }] } });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "review" });
+  await settle();
+  const status = controller.status(run.id);
+  assert.equal(status.status, "failed");
+  assert.match(String(status.error), /did not offer a read-only mode/);
+  assert.equal(provider.transport.sent("session/prompt").length, 0);
+});
+
+test("read-only modes select an advertised read-only mode before prompting", async () => {
+  const provider = new MockProvider();
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "review" });
+  await settle();
+  const modeCall = provider.transport.sent("session/set_mode")[0];
+  assert.deepEqual((modeCall.params as { modeId: string }).modeId, "ask");
+  const promptIndex = provider.transport.writes.findIndex((line) => JSON.parse(line).method === "session/prompt");
+  const modeIndex = provider.transport.writes.findIndex((line) => JSON.parse(line).method === "session/set_mode");
+  assert.ok(modeIndex < promptIndex, "mode must be selected before prompting");
   await controller.cancel(run.id);
+});
+
+test("non-successful stop reasons are not reported as success", async () => {
+  for (const stopReason of ["refusal", "max_tokens"]) {
+    const provider = new MockProvider({ stopReason });
+    const { workspace, controller } = controllerFor(provider);
+    const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+    await settle();
+    const result = controller.result(run.id);
+    assert.equal(result.status, "failed", `${stopReason} must not be success`);
+    assert.equal(result.stopReason, stopReason);
+  }
+});
+
+test("successful turn records end_turn and streamed text", async () => {
+  const provider = new MockProvider({ stopReason: "end_turn" });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const result = controller.result(run.id);
+  assert.equal(result.status, "completed");
+  assert.equal(result.stopReason, "end_turn");
+  assert.equal(result.summary, "mocked answer");
+});
+
+test("resume loads a stored session even when session/load returns null", async () => {
+  const provider = new MockProvider({ stopReason: "end_turn" });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const resumed = controller.resume({ runId: run.id, followUp: "continue" });
+  await settle();
+  assert.equal(controller.status(resumed.id).status, "completed");
+  const load = provider.transport.sent("session/load")[0];
+  assert.deepEqual(load.params, { sessionId: "mock-session", cwd: workspace, mcpServers: [] });
+});
+
+test("resume is refused when the provider does not advertise loadSession", async () => {
+  const provider = new MockProvider({ stopReason: "end_turn", loadSession: false });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const resumed = controller.resume({ runId: run.id, followUp: "continue" });
+  await settle();
+  assert.match(String(controller.status(resumed.id).error), /loadSession capability/);
 });
 
 test("controller terminates a provider that completes while permission remains pending", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
   const provider = new MockProvider({ completeBeforePermission: true });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
   assert.equal(controller.status(run.id).status, "failed");
 });
 
-test("review proceeds with a provider default mode when mode metadata is absent", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
-  const provider = new MockProvider({ withoutModes: true });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review only", mode: "review" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  const status = controller.status(run.id);
-  assert.equal(status.status, "waiting_permission");
-  assert.ok((status.liveEvents as Array<{ type: string; label?: string }>).some((event) => (
-    event.type === "activity" && event.label?.includes("not advertised")
-  )));
-  await controller.cancel(run.id);
-});
-
-test("failure status and result retain sanitized ACP stage diagnostics", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
+test("failure diagnostics keep the ACP stage but redact prompts, credentials, and outside paths", async () => {
   const provider = new MockProvider({
     rejectedMethod: "session/new",
-    rejectionMessage: "token=super-secret; prompt: sensitive request; /outside/private/path unavailable",
-    stderrOnRejected: "cursor detail authorization=hidden-value /outside/keychain",
+    rejectionMessage: "CURSOR_AUTH_TOKEN=super-secret; prompt: sensitive request; /outside/private/path unavailable",
+    stderrOnRejected: "cursor detail authorization=hidden-value",
   });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
+  const { workspace, controller } = controllerFor(provider);
   const run = controller.start({ provider: "grok", cwd: workspace, prompt: "sensitive request", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  const status = controller.status(run.id);
-  const result = controller.result(run.id);
-  assert.match(String(status.error), /ACP session\/new was rejected/);
-  assert.match(String(result.error), /token=\[REDACTED\]/);
-  assert.equal(String(result.error).includes("super-secret"), false);
-  assert.equal(String(result.error).includes("sensitive request"), false);
-  assert.equal(String(result.error).includes("/outside/private/path"), false);
-  assert.match(String(result.error), /Provider stderr:/);
-  assert.equal(String(result.error).includes("hidden-value"), false);
+  await settle();
+  const error = String(controller.result(run.id).error);
+  assert.match(error, /ACP session\/new was rejected/);
+  assert.match(error, /Provider stderr:/);
+  for (const secret of ["super-secret", "sensitive request", "/outside/private/path", "hidden-value"]) {
+    assert.equal(error.includes(secret), false, `leaked ${secret}`);
+  }
 });
 
 test("authenticate failures include only safe advertised auth method summaries", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
   const provider = new MockProvider({
+    requireAuth: true,
+    authMethods: [{ methodId: "cursor_login", type: "agent" }],
     rejectedMethod: "authenticate",
     rejectionMessage: "authorization=hidden-value",
   });
-  const controller = new RunController(new RunStore(join(workspace, "runs.json")), new WorkspacePolicy(workspace), [provider]);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "review", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
   const error = String(controller.result(run.id).error);
   assert.match(error, /ACP authenticate was rejected/);
-  assert.match(error, /Advertised auth methods: cached_token/);
+  assert.match(error, /Advertised auth methods: cursor_login:agent/);
   assert.equal(error.includes("hidden-value"), false);
 });
 
 test("controller terminates an ACP run that exceeds its configured lifetime", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "external-acp-controller-"));
   const provider = new MockProvider();
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-controller-"));
   const controller = new RunController(
     new RunStore(join(workspace, "runs.json")),
     new WorkspacePolicy(workspace),
-    [provider],
-    false,
-    5,
+    { providers: [provider], maxRunMs: 5 },
   );
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "test", mode: "plan" });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
   assert.equal(controller.status(run.id).status, "failed");
 });

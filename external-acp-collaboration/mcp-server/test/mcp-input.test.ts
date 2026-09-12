@@ -9,7 +9,7 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   const home = mkdtempSync(join(tmpdir(), "external-acp-mcp-home-"));
   const child = spawn(process.execPath, ["--experimental-strip-types", "src/index.ts"], {
     cwd: new URL("..", import.meta.url),
-    env: { PATH: process.env.PATH, HOME: home },
+    env: { PATH: process.env.PATH, HOME: home, AGENTS_ACP_CONFIG: join(home, "absent.json") },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const output: string[] = [];
@@ -34,7 +34,7 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   } })}\n`);
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: {
     name: "respond_permission",
-    arguments: { runId: "x", requestId: "rpc-1", decision: "allow-once", userConfirmed: true },
+    arguments: { runId: "x", requestId: "rpc-1", optionId: "allow-once", userConfirmed: true },
   } })}\n`);
   child.stdin.end();
   await new Promise<void>((resolve, reject) => {
@@ -50,10 +50,10 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   assert.ok(configured, errors.join(""));
   assert.ok(malformed, errors.join(""));
   assert.equal(configured.result.isError, true);
-  assert.match(configured.result.content[0].text, /EXTERNAL_ACP_WORKSPACE/);
+  assert.match(configured.result.content[0].text, /No workspace is configured/);
   assert.equal(malformed.error.code, -32603);
   assert.equal(unexpected.result.isError, true);
   assert.match(unexpected.result.content[0].text, /Unexpected tool argument/);
   assert.equal(disabledResponse.result.isError, true);
-  assert.match(disabledResponse.result.content[0].text, /ENABLE_PERMISSION_RESPONSES/);
+  assert.match(disabledResponse.result.content[0].text, /Responses are disabled/);
 });

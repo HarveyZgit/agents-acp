@@ -1,15 +1,20 @@
+import { spawnSync } from "node:child_process";
 import {
   AcpProvider,
-  addEnvironmentVariables,
   baseEnvironment,
-  type PermissionDecision,
+  providerEnvironment,
   type AuthMethod,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
 } from "./provider.ts";
-import { spawnSync } from "node:child_process";
 
+/**
+ * Only the official `cursor-agent` binary is used. `cursor` is the desktop
+ * launcher on many machines, and a bare `agent` name collides with other
+ * vendors' CLIs (including Grok tooling), so neither is an acceptable
+ * fallback for an ACP session.
+ */
 const EXECUTABLE = "cursor-agent";
 
 export type CursorProbeResult = {
@@ -33,7 +38,7 @@ class ProcessCursorProbe implements CursorProbe {
   run(executable: string, args: string[]): CursorProbeResult {
     const result = spawnSync(executable, args, {
       encoding: "utf8",
-      timeout: 2_000,
+      timeout: 5_000,
       windowsHide: true,
       shell: false,
       env: baseEnvironment(),
@@ -64,7 +69,7 @@ export class CursorProvider extends AcpProvider {
   }
 
   get executable(): string {
-    return this.resolve()?.executable ?? EXECUTABLE;
+    return EXECUTABLE;
   }
 
   discover() {
@@ -75,7 +80,7 @@ export class CursorProvider extends AcpProvider {
         available: false,
         executable: EXECUTABLE,
         capabilities: this.capabilities,
-        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`.",
+        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`.",
       };
     }
     return {
@@ -98,58 +103,46 @@ export class CursorProvider extends AcpProvider {
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
-    const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
-    for (const method of methods) {
-      if (!method || typeof method !== "object") continue;
-      const descriptor = method as { id?: unknown; methodId?: unknown; type?: unknown };
-      const methodId = typeof descriptor.methodId === "string"
-        ? descriptor.methodId
-        : typeof descriptor.id === "string" ? descriptor.id : undefined;
-      if (methodId === "cursor_login") {
-        return { methodId, type: typeof descriptor.type === "string" ? descriptor.type : undefined };
-      }
-    }
-    return undefined;
+    return readAuthMethods(initialized).find((method) => method.methodId === "cursor_login")
+      ?? readAuthMethods(initialized)[0];
   }
 
   prefersSessionBeforeAuthentication(): boolean {
     return true;
   }
 
-  allowsPreauthenticatedSessionFallback(): boolean {
-    return true;
-  }
-
-  protected environment(): NodeJS.ProcessEnv {
-    if (process.env.EXTERNAL_ACP_ENV_MODE !== "allowlist") {
-      // Cursor login can be mediated by macOS Keychain and session-specific
-      // variables. Preserve the launcher's environment by default, matching
-      // the documented CLI examples, without ever logging its values.
-      return { ...process.env };
-    }
-    return addEnvironmentVariables(baseEnvironment(), ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"]);
-  }
-
-  permissionResponse(decision: PermissionDecision): Record<string, unknown> {
-    return { outcome: { outcome: "selected", optionId: decision } };
+  protected environment(options: StartOptions): NodeJS.ProcessEnv {
+    // Cursor login state lives in the user's CLI config and OS keychain, so the
+    // child needs the session context Codex itself was started with.
+    return providerEnvironment(options, ["CURSOR_"], ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN", "CURSOR_CONFIG_DIR"]);
   }
 
   private resolve(): ResolvedCursorLaunch | undefined {
     if (this.resolved) return this.resolved;
     const version = this.probe.run(EXECUTABLE, ["--version"]);
     if (!succeeded(version)) return undefined;
-    const prefix = ["acp"];
-    const help = this.probe.run(EXECUTABLE, [...prefix, "--help"]);
+    const args = ["acp"];
+    const help = this.probe.run(EXECUTABLE, [...args, "--help"]);
     if (succeeded(help) && /\bacp\b/i.test(`${help.stdout ?? ""}\n${help.stderr ?? ""}`)) {
-      this.resolved = {
-        executable: EXECUTABLE,
-        args: prefix,
-        version: firstLine(version.stdout),
-      };
+      this.resolved = { executable: EXECUTABLE, args, version: firstLine(version.stdout) };
       return this.resolved;
     }
     return undefined;
   }
+}
+
+/** ACP descriptors use `methodId`; older agents emitted `id`. */
+export function readAuthMethods(initialized: Record<string, unknown>): AuthMethod[] {
+  const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
+  return methods.flatMap((method) => {
+    if (!method || typeof method !== "object") return [];
+    const descriptor = method as { id?: unknown; methodId?: unknown; type?: unknown };
+    const methodId = typeof descriptor.methodId === "string"
+      ? descriptor.methodId
+      : typeof descriptor.id === "string" ? descriptor.id : undefined;
+    if (!methodId) return [];
+    return [{ methodId, type: typeof descriptor.type === "string" ? descriptor.type : undefined }];
+  });
 }
 
 function succeeded(result: CursorProbeResult): boolean {

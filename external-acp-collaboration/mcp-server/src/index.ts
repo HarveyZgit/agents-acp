@@ -1,30 +1,35 @@
-import path from "node:path";
 import readline from "node:readline";
+import { loadConfig } from "./config.ts";
 import { RunController } from "./run-controller.ts";
 import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
 import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
-const workspace = process.env.EXTERNAL_ACP_WORKSPACE;
-const authorizedSubtrees = (workspace ? (process.env.EXTERNAL_ACP_ALLOWED_SUBTREES ?? "") : "")
-  .split(path.delimiter)
-  .filter(Boolean);
-const store = new RunStore(process.env.EXTERNAL_ACP_STORE_PATH);
-const configurationError = workspace
+const SERVER_VERSION = "0.2.0";
+
+const config = loadConfig();
+const store = new RunStore(config.storePath);
+const configurationError = config.workspace
   ? undefined
-  : "EXTERNAL_ACP_WORKSPACE must be set to an existing absolute workspace path before starting or resuming a run.";
+  : `No workspace is configured. Set "workspace" in ${config.configPath} or forward EXTERNAL_ACP_WORKSPACE through the plugin's .mcp.json env_vars.`;
 const controller = new RunController(
   store,
-  new WorkspacePolicy(workspace ?? process.cwd(), authorizedSubtrees, process.env.EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT === "1"),
-  undefined,
-  process.env.EXTERNAL_ACP_ENABLE_FAKE === "1",
-  positiveIntegerEnvironment("EXTERNAL_ACP_MAX_RUN_MS", 7_200_000, 60_000, 86_400_000),
+  new WorkspacePolicy(config.workspace ?? process.cwd(), config.workspace ? config.allowedSubtrees : [], config.allowUnsandboxedImplement),
+  {
+    enableFake: config.enableFake,
+    maxRunMs: config.maxRunMs,
+    idleTimeoutMs: config.idleTimeoutMs,
+    envMode: config.envMode,
+    envPassthrough: config.cursorEnvPassthrough,
+  },
 );
 let initialized = false;
-const permissionResponsesEnabled = process.env.EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES === "1";
 
 const tools = [
-  tool("list_providers", "Discover locally installed ACP providers and their documented capabilities.", { type: "object", properties: {} }),
+  tool("list_providers", "Discover locally installed ACP providers and their documented capabilities.", {
+    type: "object",
+    properties: {},
+  }),
   tool("start", "Start an ACP run. Implement mode requires allowImplement: true and is serialized per workspace.", {
     type: "object",
     required: ["provider", "cwd", "prompt", "mode"],
@@ -37,28 +42,59 @@ const tools = [
       model: { type: "string" },
     },
   }),
-  tool("status", "Return status, elapsed time, pending user decisions, and recent in-memory events.", schema(["runId"])),
-  tool("cancel", "Request ACP cancellation and terminate the local provider process.", schema(["runId"])),
+  tool("status", "Return status, lifecycle stage, elapsed time, pending decisions with their offered option IDs, and recent events.", schema(["runId"])),
+  tool("cancel", "Send the ACP cancel notification and stop the local provider process group.", schema(["runId"])),
   tool("resume", "Resume a saved ACP provider session in the same cwd.", {
     type: "object",
     required: ["followUp"],
     properties: {
       runId: { type: "string" },
-      provider: { enum: ["cursor", "grok"] },
+      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
       sessionId: { type: "string" },
       followUp: { type: "string", description: "Sent only to the provider process and never persisted." },
       allowImplement: { type: "boolean" },
     },
   }),
-  tool("result", "Return final in-memory text, changed-file summary, errors, and verification advice.", schema(["runId"])),
-  tool("respond_permission", "Submit a user-confirmed, single-use response to a pending ACP permission. Keep this tool approval-prompted in Codex.", {
+  tool("result", "Return final in-memory text, stop reason, changed-file summary, errors, and verification advice.", schema(["runId"])),
+  tool("respond_permission", "Answer a pending ACP permission with one of the provider's offered optionIds. Keep this tool approval-prompted in Codex.", {
     type: "object",
-    required: ["runId", "requestId", "decision", "userConfirmed"],
+    required: ["runId", "requestId", "optionId", "userConfirmed"],
     properties: {
       runId: { type: "string" },
       requestId: { type: "string" },
-      decision: { type: "string", enum: ["allow-once", "reject-once"] },
-      userConfirmed: { type: "boolean", description: "Must be true only after the human user selected the decision." },
+      optionId: { type: "string", description: "Must be one of the optionIds reported by status." },
+      userConfirmed: { type: "boolean", description: "Must be true only after the human user selected the option." },
+    },
+  }),
+  tool("respond_question", "Answer a pending Cursor multiple-choice question, or skip it.", {
+    type: "object",
+    required: ["runId", "requestId", "userConfirmed"],
+    properties: {
+      runId: { type: "string" },
+      requestId: { type: "string" },
+      answers: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["questionId", "selectedOptionIds"],
+          properties: {
+            questionId: { type: "string" },
+            selectedOptionIds: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+      userConfirmed: { type: "boolean" },
+    },
+  }),
+  tool("respond_plan", "Accept or reject a pending Cursor plan approval request.", {
+    type: "object",
+    required: ["runId", "requestId", "accept", "userConfirmed"],
+    properties: {
+      runId: { type: "string" },
+      requestId: { type: "string" },
+      accept: { type: "boolean" },
+      reason: { type: "string" },
+      userConfirmed: { type: "boolean" },
     },
   }),
 ];
@@ -77,9 +113,8 @@ input.on("line", async (line) => {
     return;
   }
   const request = parsed;
-  if (!request.method) return;
   try {
-    const result = await dispatch(request.method, asObject(request.params ?? {}));
+    const result = await dispatch(request.method as string, asObject(request.params ?? {}));
     if (request.id !== undefined) respond(request.id, result);
   } catch (error) {
     if (request.id !== undefined) {
@@ -95,8 +130,8 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
-        serverInfo: { name: "agents-acp", version: "0.1.11" },
-        instructions: "Never start or resume a run until EXTERNAL_ACP_WORKSPACE is configured. ACP permissions remain pending until an approval-prompted, user-confirmed response tool call.",
+        serverInfo: { name: "agents-acp", version: SERVER_VERSION },
+        instructions: "Runs are confined to the configured workspace. ACP permissions stay pending until an approval-prompted, user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -123,21 +158,23 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       const uri = requiredString(params.uri, "resource URI", 512, true);
       const match = /^agents-acp:\/\/runs\/([^/]+)$/.exec(uri);
       if (!match) throw new Error("Unknown resource URI.");
-      const run = controller.status(match[1]);
-      return { contents: [{ uri, mimeType: "text/html", text: renderRunPanel(run) }] };
+      return { contents: [{ uri, mimeType: "text/html", text: renderRunPanel(controller.status(match[1])) }] };
     }
     default:
       throw new Error(`Unsupported MCP method: ${method}`);
   }
 }
 
-async function callTool(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+async function callTool(name: string, args: Record<string, unknown>): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+}> {
   try {
     let result: unknown;
     switch (name) {
       case "list_providers":
         onlyKeys(args, []);
-        result = controller.listProviders();
+        result = { providers: controller.listProviders(), configPath: config.configPath, configLoaded: config.configLoaded };
         break;
       case "start":
         onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
@@ -175,15 +212,32 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
         result = controller.result(requiredString(args.runId, "runId", 128));
         break;
       case "respond_permission":
-        onlyKeys(args, ["runId", "requestId", "decision", "userConfirmed"]);
-        if (!permissionResponsesEnabled) {
-          throw new Error("Permission responses are disabled until EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1 is explicitly configured.");
-        }
-        if (args.userConfirmed !== true) throw new Error("A permission response requires explicit userConfirmed: true.");
+        onlyKeys(args, ["runId", "requestId", "optionId", "userConfirmed"]);
+        requirePermissionResponses(args.userConfirmed);
         result = controller.respondPermission(
           requiredString(args.runId, "runId", 128),
           requiredString(args.requestId, "requestId", 128),
-          stringEnum(args.decision, ["allow-once", "reject-once"]),
+          requiredString(args.optionId, "optionId", 128),
+        );
+        break;
+      case "respond_question":
+        onlyKeys(args, ["runId", "requestId", "answers", "userConfirmed"]);
+        requirePermissionResponses(args.userConfirmed);
+        result = controller.respondQuestion(
+          requiredString(args.runId, "runId", 128),
+          requiredString(args.requestId, "requestId", 128),
+          readAnswers(args.answers),
+        );
+        break;
+      case "respond_plan":
+        onlyKeys(args, ["runId", "requestId", "accept", "reason", "userConfirmed"]);
+        requirePermissionResponses(args.userConfirmed);
+        if (typeof args.accept !== "boolean") throw new Error("Expected accept to be a boolean.");
+        result = controller.respondPlan(
+          requiredString(args.runId, "runId", 128),
+          requiredString(args.requestId, "requestId", 128),
+          args.accept,
+          optionalString(args.reason, "reason", 512),
         );
         break;
       default:
@@ -191,8 +245,27 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
     }
     return success(result);
   } catch (error) {
-    return { content: [{ type: "text", text: JSON.stringify({ error: error instanceof Error ? error.message : "Unexpected error" }) }], isError: true };
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: error instanceof Error ? error.message : "Unexpected error" }) }],
+      isError: true,
+    };
   }
+}
+
+function readAnswers(value: unknown): Array<{ questionId: string; selectedOptionIds: string[] }> | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("Expected answers to be an array.");
+  return value.map((entry) => {
+    const answer = asObject(entry);
+    const selected = answer.selectedOptionIds;
+    if (!Array.isArray(selected) || selected.some((option) => typeof option !== "string")) {
+      throw new Error("Expected selectedOptionIds to be an array of strings.");
+    }
+    return {
+      questionId: requiredString(answer.questionId, "questionId", 128),
+      selectedOptionIds: selected as string[],
+    };
+  });
 }
 
 function tool(name: string, description: string, inputSchema: Record<string, unknown>): Record<string, unknown> {
@@ -224,11 +297,6 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function onlyKeys(value: Record<string, unknown>, allowed: string[]): void {
-  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
-  if (unexpected.length > 0) throw new Error(`Unexpected tool argument: ${unexpected[0]}`);
-}
-
 function requiredString(value: unknown, name: string, maximumLength: number, forbidControl = false): string {
   if (typeof value !== "string" || !value || value.length > maximumLength || (forbidControl && /[\0-\x1f\x7f]/.test(value))) {
     throw new Error(`Expected ${name} to be a non-empty string no longer than ${maximumLength} characters.`);
@@ -241,20 +309,25 @@ function optionalString(value: unknown, name: string, maximumLength: number): st
   return requiredString(value, name, maximumLength);
 }
 
+function stringEnum<T extends string>(value: unknown, values: readonly T[]): T {
+  if (typeof value !== "string" || !values.includes(value as T)) throw new Error(`Expected one of: ${values.join(", ")}`);
+  return value as T;
+}
+
+function onlyKeys(value: Record<string, unknown>, allowed: string[]): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) throw new Error(`Unexpected tool argument: ${unexpected[0]}`);
+}
+
 function requireWorkspaceConfiguration(): void {
   if (configurationError) throw new Error(configurationError);
 }
 
-function positiveIntegerEnvironment(name: string, fallback: number, minimum: number, maximum: number): number {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
-}
-
-function stringEnum<T extends string>(value: unknown, values: readonly T[]): T {
-  if (typeof value !== "string" || !values.includes(value as T)) throw new Error(`Expected one of: ${values.join(", ")}`);
-  return value as T;
+function requirePermissionResponses(userConfirmed: unknown): void {
+  if (!config.enablePermissionResponses) {
+    throw new Error(`Responses are disabled. Set "enablePermissionResponses": true in ${config.configPath} or forward EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1.`);
+  }
+  if (userConfirmed !== true) throw new Error("A response requires explicit userConfirmed: true.");
 }
 
 type JsonRpcRequest = {

@@ -1,12 +1,12 @@
 import {
   AcpProvider,
-  addEnvironmentVariables,
-  baseEnvironment,
-  type ProviderCapabilities,
+  providerEnvironment,
   type AuthMethod,
+  type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
 } from "./provider.ts";
+import { readAuthMethods } from "./cursor.ts";
 
 export class GrokProvider extends AcpProvider {
   readonly name: ProviderName = "grok";
@@ -28,19 +28,13 @@ export class GrokProvider extends AcpProvider {
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
-    const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
-    const ids = new Set(methods.flatMap((method) => (
-      typeof method === "object" && method !== null && typeof (method as { id?: unknown }).id === "string"
-        ? [(method as { id: string }).id]
-        : []
-    )));
-    if (ids.has("cached_token")) return { methodId: "cached_token" };
-    // The CLI, not this plugin, reads a pre-existing environment credential.
-    if (ids.has("xai.api_key") && process.env.XAI_API_KEY) return { methodId: "xai.api_key" };
-    return undefined;
+    const methods = readAuthMethods(initialized);
+    return methods.find((method) => method.methodId === "cached_token")
+      // The CLI, not this plugin, reads a pre-existing environment credential.
+      ?? methods.find((method) => method.methodId === "xai.api_key" && process.env.XAI_API_KEY !== undefined);
   }
 
-  protected environment(): NodeJS.ProcessEnv {
-    return addEnvironmentVariables(baseEnvironment(), ["XAI_API_KEY"]);
+  protected environment(options: StartOptions): NodeJS.ProcessEnv {
+    return providerEnvironment(options, ["XAI_", "GROK_"], ["XAI_API_KEY", "GROK_CONFIG_DIR"]);
   }
 }

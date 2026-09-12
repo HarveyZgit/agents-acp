@@ -39,7 +39,7 @@ export class WorkspacePolicy {
       throw new Error("Implement mode requires explicit allowImplement: true.");
     }
     if (request.mode === "implement" && !this.allowUnsandboxedImplement) {
-      throw new Error("Implement mode is disabled until EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT=1 is explicitly configured.");
+      throw new Error('Implement mode is disabled until "allowUnsandboxedImplement": true is set in the agents-acp config file or EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT=1 is forwarded.');
     }
     return { cwd, workspace: this.workspace, readOnly: request.mode !== "implement" };
   }

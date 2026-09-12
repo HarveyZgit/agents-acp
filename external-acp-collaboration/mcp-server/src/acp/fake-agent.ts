@@ -1,9 +1,22 @@
 import readline from "node:readline";
 
+/**
+ * Deterministic ACP agent used by the local smoke test. It follows the
+ * documented ACP shapes (SessionModeState, permission options, stop reasons,
+ * tool_call diffs) so the smoke flow cannot pass against a wrong client.
+ */
 let nextSession = 1;
 let nextPermission = 900;
 let pendingPromptId: number | string | undefined;
 let pendingPermissionId: number | string | undefined;
+let authenticated = process.env.FAKE_ACP_REQUIRE_AUTH !== "1";
+let currentModeId = "agent";
+
+const AVAILABLE_MODES = [
+  { id: "ask", name: "Ask" },
+  { id: "plan", name: "Plan" },
+  { id: "agent", name: "Agent" },
+];
 
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
@@ -17,76 +30,131 @@ input.on("line", (line) => {
   }
 
   if (typeof message.method === "string") {
-    handleRequest(message);
-  } else if (message.id === pendingPermissionId) {
-    notify("session/update", {
-      update: { sessionUpdate: "agent_message_chunk", content: { text: "Fake ACP permission response received.\n" } },
-    });
-    respond(pendingPromptId, { stopReason: "end_turn" });
-    pendingPromptId = undefined;
+    handleMethod(message);
+    return;
+  }
+  if (message.id === pendingPermissionId && pendingPermissionId !== undefined) {
+    const outcome = (message.result as { outcome?: { outcome?: string } } | undefined)?.outcome?.outcome;
     pendingPermissionId = undefined;
+    if (outcome === "cancelled") {
+      finishPrompt("cancelled");
+      return;
+    }
+    notify("session/update", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Fake ACP permission response received.\n" },
+    });
+    finishPrompt("end_turn");
   }
 });
 
-function handleRequest(message: Record<string, unknown>): void {
+function handleMethod(message: Record<string, unknown>): void {
   const id = message.id as number | string | undefined;
+  const params = (message.params ?? {}) as Record<string, unknown>;
   switch (message.method) {
     case "initialize":
-      respond(id, { authMethods: [{ id: "fake_local" }] });
+      respond(id, {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true },
+        authMethods: authenticated ? [] : [{ methodId: "fake_local", type: "agent" }],
+      });
       return;
     case "authenticate":
-    case "session/set_config_option":
+      authenticated = true;
       respond(id, {});
       return;
     case "session/new":
+      if (!authenticated) {
+        respondError(id, -32000, "auth_required");
+        return;
+      }
+      currentModeId = "agent";
       respond(id, session(`fake-session-${nextSession++}`));
       return;
     case "session/load": {
-      const sessionId = (message.params as { sessionId?: unknown } | undefined)?.sessionId;
-      respond(id, session(typeof sessionId === "string" ? sessionId : `fake-session-${nextSession++}`));
+      const sessionId = typeof params.sessionId === "string" ? params.sessionId : `fake-session-${nextSession++}`;
+      currentModeId = "agent";
+      // ACP permits a null/empty result for session/load.
+      respondRaw(id, null);
+      notify("session/update", { sessionUpdate: "current_mode_update", currentModeId });
+      lastLoadedSession = sessionId;
       return;
     }
+    case "session/set_mode":
+      currentModeId = typeof params.modeId === "string" ? params.modeId : currentModeId;
+      respond(id, {});
+      return;
     case "session/prompt":
       pendingPromptId = id;
       notify("session/update", {
-        update: { sessionUpdate: "agent_message_chunk", content: { text: "Fake ACP run started.\n" } },
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Fake ACP run started.\n" },
       });
-      notify("session/update", { update: { sessionUpdate: "tool_call" } });
-      notify("session/update", { update: { sessionUpdate: "file_change", path: "fake-output.txt" } });
+      notify("session/update", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        title: "Write fake output",
+        kind: "edit",
+        status: "completed",
+        locations: [{ path: "fake-output.txt" }],
+        content: [{ type: "diff", path: "fake-output.txt", oldText: "old", newText: "new" }],
+      });
       pendingPermissionId = nextPermission++;
-      notifyRequest(pendingPermissionId, "session/request_permission", { title: "Fake permission request" });
+      request(pendingPermissionId, "session/request_permission", {
+        sessionId: "fake-session",
+        toolCall: { toolCallId: "tool-1", title: "Apply fake change" },
+        options: [
+          { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+          { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+        ],
+      });
       return;
     case "session/cancel":
-      respond(id, {});
+      // ACP cancel is a notification; the prompt resolves with "cancelled".
+      pendingPermissionId = undefined;
+      finishPrompt("cancelled");
       return;
     default:
-      respondError(id, -32601, "Unknown fake ACP method");
+      if (id !== undefined) respondError(id, -32601, "Unknown fake ACP method");
   }
 }
+
+let lastLoadedSession: string | undefined;
 
 function session(sessionId: string): Record<string, unknown> {
   return {
     sessionId,
-    configOptions: [{
-      id: "mode",
-      category: "mode",
-      options: [{ value: "ask" }, { value: "plan" }, { value: "agent" }],
-    }],
+    modes: { currentModeId, availableModes: AVAILABLE_MODES },
   };
 }
 
-function notify(method: string, params: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+function finishPrompt(stopReason: string): void {
+  if (pendingPromptId === undefined) return;
+  const id = pendingPromptId;
+  pendingPromptId = undefined;
+  respond(id, { stopReason });
 }
 
-function notifyRequest(id: number | string, method: string, params: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+function notify(method: string, params: Record<string, unknown>): void {
+  write({ jsonrpc: "2.0", method, params: method === "session/update" ? { sessionId: lastLoadedSession ?? "fake-session", update: params } : params });
+}
+
+function request(id: number | string, method: string, params: Record<string, unknown>): void {
+  write({ jsonrpc: "2.0", id, method, params });
 }
 
 function respond(id: number | string | undefined, result: Record<string, unknown>): void {
-  if (id !== undefined) process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  if (id !== undefined) write({ jsonrpc: "2.0", id, result });
+}
+
+function respondRaw(id: number | string | undefined, result: unknown): void {
+  if (id !== undefined) write({ jsonrpc: "2.0", id, result });
 }
 
 function respondError(id: number | string | undefined, code: number, message: string): void {
-  if (id !== undefined) process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
+  if (id !== undefined) write({ jsonrpc: "2.0", id, error: { code, message } });
+}
+
+function write(message: unknown): void {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
 }

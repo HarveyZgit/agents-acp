@@ -1,63 +1,90 @@
-# Linux Codex installation — agents-acp 0.1.11
+# Installing agents-acp 0.2.0 into Codex
 
 ## Preconditions
 
-- Linux with Node.js 22.6 or newer (`node --version`). The plugin runs
-  dependency-free TypeScript with Node's `--experimental-strip-types`.
-- Codex with the documented `codex plugin marketplace` command available.
+- Node.js 22.6 or newer (`node --version`). The plugin runs dependency-free
+  TypeScript with Node's `--experimental-strip-types`.
+- Codex with the documented `codex plugin marketplace` commands.
 - Optionally, an already installed and already authenticated Cursor CLI
-  (`agent`) and/or Grok Build CLI (`grok`). Do not install or authenticate a
-  provider just to use this plugin.
+  (`cursor-agent`) and/or Grok Build CLI (`grok`). Do not install or
+  authenticate a provider just to use this plugin.
 
-## Install from this repository
+## 1. Configure the workspace boundary
 
-The repository already contains the documented marketplace file
-`.agents/plugins/marketplace.json`. Its source path is relative to the
-repository root.
+Codex starts bundled MCP servers itself; it does **not** hand your shell
+environment to them. Earlier versions of this document were wrong about that.
+Configuration therefore lives in a file that the server reads directly:
+
+```bash
+mkdir -p ~/.codex/agents-acp
+cat > ~/.codex/agents-acp/config.json <<'JSON'
+{
+  "workspace": "/absolute/path/to/project",
+  "allowedSubtrees": [],
+  "enablePermissionResponses": true,
+  "allowUnsandboxedImplement": false,
+  "maxRunMs": 7200000,
+  "idleTimeoutMs": 900000,
+  "envMode": "session"
+}
+JSON
+chmod 600 ~/.codex/agents-acp/config.json
+```
+
+Fields:
+
+| Field | Meaning |
+| --- | --- |
+| `workspace` | Required. The only root in which providers may be started. |
+| `allowedSubtrees` | Extra launch directories, each inside `workspace`. |
+| `enablePermissionResponses` | Enables `respond_permission` / `respond_question` / `respond_plan`. |
+| `allowUnsandboxedImplement` | Required for `implement`; provider writes are not OS-sandboxed. |
+| `maxRunMs` | Hard run budget (1 minute to 24 hours). |
+| `idleTimeoutMs` | Aborts a silent provider; paused while a decision is pending. |
+| `envMode` | `session` (auditable allowlist, default), `inherit`, or `minimal`. |
+| `storePath` | Optional run-store location. |
+| `enableFake` | Registers the bundled fake ACP agent. Leave unset in production. |
+
+The plugin's `.mcp.json` also declares `env_vars`, so Codex forwards these when
+they exist in its own environment, and they override the config file:
+`AGENTS_ACP_CONFIG`, `EXTERNAL_ACP_WORKSPACE`, `EXTERNAL_ACP_ALLOWED_SUBTREES`,
+`EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT`,
+`EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES`, `EXTERNAL_ACP_MAX_RUN_MS`,
+`EXTERNAL_ACP_IDLE_TIMEOUT_MS`, `EXTERNAL_ACP_STORE_PATH`,
+`EXTERNAL_ACP_ENV_MODE`, `EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH`, and the
+provider/session variables (`HOME`, `PATH`, `SHELL`, `SSH_AUTH_SOCK`,
+`SECURITYSESSIONID`, `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, `XAI_API_KEY`, …).
+Never put secret values in the plugin manifest; `env_vars` forwards names only.
+
+## 2. Install the plugin
 
 ```bash
 git clone https://github.com/HarveyZgit/agents-acp.git
 cd agents-acp
-
-# Choose the only workspace in which provider processes may be started.
-export EXTERNAL_ACP_WORKSPACE="/absolute/path/to/project"
-
-# Optional: restrict launches further to existing paths beneath that workspace.
-export EXTERNAL_ACP_ALLOWED_SUBTREES="/absolute/path/to/project/packages"
-
-# Optional, bounded to 1 minute through 24 hours; default is 2 hours.
-export EXTERNAL_ACP_MAX_RUN_MS=7200000
-
-# Required before any pending ACP permission can receive a response.
-# Keep respond_permission approval-prompted in Codex.
-export EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES=1
-
-# Register the repository as a local Codex marketplace, then verify it.
 codex plugin marketplace add "$PWD"
 codex plugin marketplace list
 ```
 
-Start the Codex client from the same environment so the bundled MCP server
-inherits `EXTERNAL_ACP_WORKSPACE`. In the Desktop app, install and enable
-`agents-acp` from the added marketplace, then enable its
-bundled MCP server. Restart the desktop app after changing plugin files.
+The repository ships `.agents/plugins/marketplace.json`, whose `source.path`
+points at `./external-acp-collaboration` (the plugin directory; the Codex-facing
+identity is `agents-acp`).
 
-The plugin fails closed: `start` and
-`resume` return an error when `EXTERNAL_ACP_WORKSPACE` is not
-present or does not name an existing directory. A Desktop launcher that does
-not inherit shell variables needs an OS-level environment configuration; no
-portable Codex Desktop setting for that is documented here.
+Restart the Codex client, install and enable `agents-acp`, then enable its
+bundled MCP server. Keep the response tools approval-prompted, for example:
 
-## Smoke test
+```toml
+[plugins."agents-acp".mcp_servers.agents-acp.tools.respond_permission]
+approval_mode = "approve"
+```
 
-Run only read-only commands first:
+## 3. Smoke test
 
 ```bash
 node --version
 cursor-agent --version
 cursor-agent acp --help
+cursor-agent status
 grok --version
-grok --help
 grok agent --help
 
 cd external-acp-collaboration/mcp-server
@@ -65,80 +92,70 @@ npm test
 npm run smoke:main
 ```
 
-The Cursor adapter uses only `cursor-agent acp`. It checks
-`cursor-agent --version` and a short `cursor-agent acp --help` probe.
-`list_providers` reports that resolved executable and argv
-prefix, which start and resume reuse. It intentionally never falls back to
-`cursor` or `agent`, which may conflict with unrelated local tools.
+`npm run smoke:main` starts a fresh MCP server plus the bundled fake ACP agent
+and asserts the full flow: provider discovery, read-only mode negotiation,
+streamed text, tool-call derived file changes, a pending permission with its
+offered option IDs, rejection of an unoffered option, an approved response,
+completion with `stopReason: "end_turn"`, resume through `session/load`,
+cancellation, and the blocked `implement` gate. It requires no Codex login and
+no Cursor/Grok binaries.
 
-When `cursor-agent status` already reports a logged-in user, agents-acp tries
-`session/new` before protocol authentication. It only calls `authenticate`
-for an advertised non-terminal method when session creation requires it.
-Terminal auth methods and an omitted `authMethods` list are never sent to
-`authenticate`.
+In Codex, then call:
 
-For Cursor ACP, start Codex from the same macOS/Linux user session where
-`cursor-agent status` works. The Cursor child inherits Codex's environment by
-default so that existing login/keychain context remains available. Do not set
-`EXTERNAL_ACP_ENV_MODE=allowlist` unless a deliberately restricted Cursor
-environment is required.
+1. `list_providers` — confirm `cursor-agent acp` resolved and `configLoaded` is true.
+2. `start` with `mode: "review"` and a harmless prompt, with `cwd` inside `workspace`.
+3. `status` while it runs, then `result` when it finishes.
 
-`smoke:main` launches a fresh MCP server and its bundled fake ACP fixture. It
-requires neither Codex authentication nor Cursor/Grok binaries, and verifies
-provider discovery, start, streamed events, permission waiting, explicit
-single-use response, completion/result, resume, and cancellation. It enables
-the fake provider only in the smoke process.
+If a permission appears, `status` lists its `requestId` and the provider's
+offered `options`. Choose one yourself and call `respond_permission` with that
+`optionId` and `userConfirmed: true`. Nothing is auto-approved.
 
-In Codex, enable the plugin and call:
+### If Cursor reports an authentication problem
 
-1. `list_providers`
-2. `start` with `mode: "review"` and a harmless read-only
-   prompt, with `cwd` inside `EXTERNAL_ACP_WORKSPACE`
-3. `status` while it runs, then
-   `result` after completion
+`cursor-agent` login state lives in its CLI config and the OS keychain. Start
+Codex from the same user session where `cursor-agent status` reports a login.
+If a session still cannot be created, the failure text names the ACP stage, the
+JSON-RPC code, the advertised auth methods, and a sanitized stderr tail. When
+only a `terminal` auth method is advertised, run `cursor-agent login` in a
+terminal; ACP forbids sending terminal methods to `authenticate`.
 
-If a provider asks permission, the run remains pending. It is never approved
-automatically. After the human selects `allow-once` or `reject-once`, call
-`respond_permission` with the run ID, pending request ID,
-chosen decision, and `userConfirmed: true`. Keep this tool in Codex's
-approval-prompted policy; `userConfirmed` records an explicit caller
-assertion but cannot cryptographically prove user presence.
+## 4. Optional write mode
 
-Cursor's documented ACP permission response supports this single-use response.
-Grok's current public ACP documentation does not specify a response payload,
-so the Grok adapter intentionally leaves such requests pending rather than
-guessing or auto-approving.
+A provider process is not an OS sandbox: setting `cwd` does not stop a CLI from
+using absolute paths. Write mode therefore has two gates and belongs in a
+disposable workspace:
 
-## Optional write-mode test
-
-A provider process is not an operating-system sandbox: setting its `cwd`
-does not stop a CLI from issuing an absolute-path command. For that reason,
-write mode has two explicit gates and should only be used in a disposable
-workspace:
-
-```bash
-export EXTERNAL_ACP_WORKSPACE="/absolute/path/to/disposable-project"
-export EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT=1
+```json
+{ "workspace": "/absolute/path/to/disposable", "allowUnsandboxedImplement": true }
 ```
 
-Then use `start` with `mode: "implement"` and
-`allowImplement: true`. The plugin serializes this mode per configured
-workspace but does not claim to provide OS-level filesystem isolation.
+Then call `start` with `mode: "implement"` and `allowImplement: true`. Write
+runs are serialized per workspace.
+
+## 5. Upgrading
+
+A path-based marketplace has no in-place upgrade. Re-add it:
+
+```bash
+cd /path/to/agents-acp
+git pull --ff-only origin main
+codex plugin marketplace remove agents-acp
+codex plugin marketplace add "$PWD"
+```
+
+Restart Codex, then confirm the reported plugin version is 0.2.0.
 
 ## Archive
 
-`dist/agents-acp-0.1.11.zip` and
-`dist/agents-acp-0.1.11.tar.gz` are portable copies of the
-plugin folder. Extract either into a directory, then create a marketplace
-entry whose `source.path` is `./external-acp-collaboration` relative to that
-marketplace root.
+`dist/agents-acp-0.2.0.zip` and `dist/agents-acp-0.2.0.tar.gz` contain the
+plugin directory. Extract one, then point a marketplace entry's `source.path`
+at `./external-acp-collaboration` relative to that marketplace root.
 
-Rebuild the archive from the repository root without installing dependencies:
+Rebuild them from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.1.11.tar.gz
-tar -C . -czf dist/agents-acp-0.1.11.tar.gz external-acp-collaboration
-rm -f dist/agents-acp-0.1.11.zip
-zip -qr dist/agents-acp-0.1.11.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.1.11.{tar.gz,zip}
+rm -f dist/agents-acp-0.2.0.tar.gz dist/agents-acp-0.2.0.zip
+tar -C . -czf dist/agents-acp-0.2.0.tar.gz external-acp-collaboration
+zip -qr dist/agents-acp-0.2.0.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.2.0.{tar.gz,zip}
 ```

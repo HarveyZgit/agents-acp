@@ -29,7 +29,7 @@ export class RunStore {
   private readonly filePath: string;
   private data: StoreData;
 
-  constructor(filePath = join(homedir(), ".codex", "external-acp-collaboration", "runs.json")) {
+  constructor(filePath = join(homedir(), ".codex", "agents-acp", "runs.json")) {
     this.filePath = filePath;
     this.data = this.load();
     this.reconcileInterruptedRuns();
@@ -90,7 +90,7 @@ export class RunStore {
         record.events.push(persistedEvent(event));
         if (record.events.length > 500) record.events.splice(0, record.events.length - 500);
       }
-      if (event.type === "activity") record.lastActivity = "Agent reported progress";
+      if (event.type === "activity") record.lastActivity = safeLabel(event.label);
       if (event.type === "file_change" && record.changedFiles.length < 500) {
         record.changedFiles.push({ path: event.path, kind: event.kind });
       }
@@ -208,9 +208,15 @@ function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<Run
     case "started":
       return { type: "started", provider: event.provider, sessionId: event.sessionId?.slice(0, 512) };
     case "activity":
-      return { type: "activity", label: "Agent reported progress" };
+      return { type: "activity", label: safeLabel(event.label) };
     case "permission":
-      return { type: "permission", requestId: event.requestId.slice(0, 128), description: "Agent requires a user decision." };
+      return {
+        type: "permission",
+        requestId: event.requestId.slice(0, 128),
+        description: "Agent requires a user decision.",
+        kind: event.kind,
+        options: event.options?.slice(0, 20).map((option) => ({ optionId: option.optionId.slice(0, 128), kind: option.kind })),
+      };
     case "file_change":
       return { type: "file_change", path: event.path.slice(0, 4_096), kind: event.kind };
     case "error":
@@ -220,12 +226,21 @@ function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<Run
   }
 }
 
+/**
+ * Only the controller's own ACP stage diagnostics are persisted; they are
+ * already sanitized, and this is a second, independent redaction pass.
+ */
 function storedDiagnostic(value: string): string {
-  // Only the controller's allowlisted ACP stage diagnostics are persisted.
-  // Provider-provided JSON-RPC messages, prompts, and stderr never reach here.
-  return value.startsWith("ACP ")
-    ? value.replace(/(?:api[_ -]?key|token|secret|password|authorization)\s*[:=]\s*\S+/gi, "$1=[REDACTED]").slice(0, 500)
-    : "Provider reported an error.";
+  if (!value.startsWith("ACP ")) return "Provider reported an error.";
+  return value
+    .replace(/\b[A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*\s*[:=]\s*\S+/gi, "[REDACTED CREDENTIAL]")
+    .replace(/\b(authorization|bearer)\b\s*[:= ]\s*\S+/gi, "$1 [REDACTED]")
+    .slice(0, 600);
+}
+
+/** Agent-authored text is replaced; adapter-authored notes are preserved. */
+function safeLabel(label: string): string {
+  return label.startsWith("ACP ") ? label.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : "Agent reported progress";
 }
 
 function isProcessAlive(pid: number): boolean {

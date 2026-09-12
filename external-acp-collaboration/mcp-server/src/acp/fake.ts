@@ -1,17 +1,18 @@
 import { fileURLToPath } from "node:url";
 import {
   AcpProvider,
-  type PermissionDecision,
+  baseEnvironment,
   type AuthMethod,
   type ProviderAvailability,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
 } from "./provider.ts";
+import { readAuthMethods } from "./cursor.ts";
 
 /**
  * A deterministic ACP fixture for smoke tests. It is never registered unless
- * EXTERNAL_ACP_ENABLE_FAKE=1 is supplied to the MCP server process.
+ * the fake provider is explicitly enabled for the MCP server process.
  */
 export class FakeProvider extends AcpProvider {
   readonly name: ProviderName = "fake";
@@ -39,13 +40,14 @@ export class FakeProvider extends AcpProvider {
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
-    const methods = Array.isArray(initialized.authMethods) ? initialized.authMethods : [];
-    return methods.some((method) => (
-      typeof method === "object" && method !== null && (method as { id?: string }).id === "fake_local"
-    )) ? { methodId: "fake_local" } : undefined;
+    return readAuthMethods(initialized).find((method) => method.methodId === "fake_local");
   }
 
-  permissionResponse(decision: PermissionDecision): Record<string, unknown> {
-    return { outcome: { outcome: "selected", optionId: decision } };
+  prefersSessionBeforeAuthentication(): boolean {
+    return true;
+  }
+
+  protected environment(): NodeJS.ProcessEnv {
+    return { ...baseEnvironment(), FAKE_ACP_REQUIRE_AUTH: process.env.FAKE_ACP_REQUIRE_AUTH ?? "" };
   }
 }
