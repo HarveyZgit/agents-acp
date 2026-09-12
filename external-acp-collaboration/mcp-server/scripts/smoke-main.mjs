@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -138,6 +138,23 @@ try {
   const cancelled = await call("cancel", { runId: cancellable.id });
   assert.equal(cancelled.status, "cancelled");
 
+  // A leftover lock from a dead writer must be reclaimed, not fatal.
+  writeFileSync(`${join(dataHome, "runs.json")}.lock`, "2147483646", { mode: 0o600 });
+  const contended = await call("start", {
+    provider: "fake",
+    cwd: workspace,
+    prompt: "Run while the store lock is contended.",
+    mode: "plan",
+  });
+  const contendedWaiting = await waitFor(contended.id, "waiting_permission");
+  await call("respond_permission", {
+    runId: contended.id,
+    requestId: contendedWaiting.pendingRequests[0].requestId,
+    optionId: "allow-once",
+    userConfirmed: true,
+  });
+  await waitFor(contended.id, "completed");
+
   // Implement must stay blocked without the explicit local opt-in.
   const blocked = await callExpectingError("start", {
     provider: "fake",
@@ -146,12 +163,43 @@ try {
     mode: "implement",
     allowImplement: true,
   });
-  assert.match(blocked, /ALLOW_UNSANDBOXED_IMPLEMENT/);
+  assert.match(blocked, /allowUnsandboxedImplement/);
 
-  console.log("PASS: agents-acp main flow (providers, review mode negotiation, streaming, permission options, result, resume, cancel, implement gate).");
+  // A live provider must not be orphaned when the transport closes.
+  const orphan = await call("start", {
+    provider: "fake",
+    cwd: workspace,
+    prompt: "Start a run that outlives the client.",
+    mode: "plan",
+  });
+  await waitFor(orphan.id, "waiting_permission");
+  const providerPids = childPids(child.pid);
+  assert.ok(providerPids.length > 0, "expected a live provider child process");
+
+  child.stdin.end();
+  await new Promise((resolve) => child.once("exit", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const survivors = providerPids.filter(isAlive);
+  assert.deepEqual(survivors, [], `provider processes were orphaned: ${survivors.join(", ")}`);
+
+  console.log("PASS: agents-acp main flow (providers, review mode negotiation, streaming, permission options, result, resume, cancel, store contention, implement gate, orphan cleanup).");
 } finally {
   lines.close();
   child.kill();
   rmSync(workspace, { recursive: true, force: true });
   rmSync(dataHome, { recursive: true, force: true });
+}
+
+function childPids(parentPid) {
+  const result = spawnSync("pgrep", ["-P", String(parentPid)], { encoding: "utf8" });
+  return (result.stdout ?? "").split("\n").map((line) => Number(line.trim())).filter(Number.isInteger).filter(Boolean);
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

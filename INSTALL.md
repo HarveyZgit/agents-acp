@@ -1,4 +1,4 @@
-# Installing agents-acp 0.2.0 into Codex
+# Installing agents-acp 0.2.1 into Codex
 
 ## Preconditions
 
@@ -42,7 +42,7 @@ Fields:
 | `maxRunMs` | Hard run budget (1 minute to 24 hours). |
 | `idleTimeoutMs` | Aborts a silent provider; paused while a decision is pending. |
 | `envMode` | `session` (auditable allowlist, default), `inherit`, or `minimal`. |
-| `storePath` | Optional run-store location. |
+| `storePath` | Optional run-store location. Give each Codex profile/session its own path to avoid machine-wide lock contention, for example `~/.codex/agents-acp/runs-<project>.json`. |
 | `enableFake` | Registers the bundled fake ACP agent. Leave unset in production. |
 
 The plugin's `.mcp.json` also declares `env_vars`, so Codex forwards these when
@@ -92,13 +92,25 @@ npm test
 npm run smoke:main
 ```
 
+### Run-store resilience
+
+The run store is a best-effort record, never a correctness dependency. A busy
+lock is retried with backoff for roughly 300ms, a lock left by a dead writer or
+one older than 30 seconds is reclaimed, and a corrupt file is moved aside. If
+persistence still fails, live run state stays authoritative in memory and
+`status` / `result` report `storeDegraded` instead of the server exiting.
+
+Two Codex sessions sharing one `storePath` are safe but will contend. Set a
+distinct `storePath` per project or profile if you run several at once.
+
 `npm run smoke:main` starts a fresh MCP server plus the bundled fake ACP agent
 and asserts the full flow: provider discovery, read-only mode negotiation,
 streamed text, tool-call derived file changes, a pending permission with its
 offered option IDs, rejection of an unoffered option, an approved response,
 completion with `stopReason: "end_turn"`, resume through `session/load`,
-cancellation, and the blocked `implement` gate. It requires no Codex login and
-no Cursor/Grok binaries.
+cancellation, survival of a stale run-store lock, the blocked `implement` gate,
+and termination of provider process groups when the transport closes. It
+requires no Codex login and no Cursor/Grok binaries.
 
 In Codex, then call:
 
@@ -143,19 +155,19 @@ codex plugin marketplace remove agents-acp
 codex plugin marketplace add "$PWD"
 ```
 
-Restart Codex, then confirm the reported plugin version is 0.2.0.
+Restart Codex, then confirm the reported plugin version is 0.2.1.
 
 ## Archive
 
-`dist/agents-acp-0.2.0.zip` and `dist/agents-acp-0.2.0.tar.gz` contain the
+`dist/agents-acp-0.2.1.zip` and `dist/agents-acp-0.2.1.tar.gz` contain the
 plugin directory. Extract one, then point a marketplace entry's `source.path`
 at `./external-acp-collaboration` relative to that marketplace root.
 
 Rebuild them from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.2.0.tar.gz dist/agents-acp-0.2.0.zip
-tar -C . -czf dist/agents-acp-0.2.0.tar.gz external-acp-collaboration
-zip -qr dist/agents-acp-0.2.0.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.2.0.{tar.gz,zip}
+rm -f dist/agents-acp-0.2.1.tar.gz dist/agents-acp-0.2.1.zip
+tar -C . -czf dist/agents-acp-0.2.1.tar.gz external-acp-collaboration
+zip -qr dist/agents-acp-0.2.1.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.2.1.{tar.gz,zip}
 ```

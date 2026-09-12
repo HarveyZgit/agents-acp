@@ -5,7 +5,7 @@ import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
 import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.2.1";
 
 const config = loadConfig();
 const store = new RunStore(config.storePath);
@@ -24,6 +24,38 @@ const controller = new RunController(
   },
 );
 let initialized = false;
+let shuttingDown = false;
+
+/**
+ * Provider children run in their own detached process groups, so the server
+ * must terminate them when Codex stops or closes the transport. A crash is
+ * reported on stderr instead of silently killing an in-flight run.
+ */
+function shutdown(reason: string, exitCode?: number): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    controller.shutdown(reason);
+  } catch (error) {
+    report("shutdown failed", error);
+  }
+  if (exitCode !== undefined) process.exit(exitCode);
+}
+
+function report(context: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`agents-acp: ${context}: ${message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 500)}\n`);
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => shutdown(`received ${signal}`, 0));
+}
+process.on("exit", () => shutdown("the MCP server exited"));
+process.on("uncaughtException", (error) => {
+  report("uncaught exception", error);
+  shutdown("the MCP server hit an uncaught exception", 1);
+});
+process.on("unhandledRejection", (error) => report("unhandled rejection", error));
 
 const tools = [
   tool("list_providers", "Discover locally installed ACP providers and their documented capabilities.", {
@@ -100,6 +132,9 @@ const tools = [
 ];
 
 const input = readline.createInterface({ input: process.stdin });
+// When the client closes stdin the server has no further work; exit instead of
+// lingering with live provider children.
+input.on("close", () => shutdown("the Codex transport closed", 0));
 input.on("line", async (line) => {
   let parsed: unknown;
   try {

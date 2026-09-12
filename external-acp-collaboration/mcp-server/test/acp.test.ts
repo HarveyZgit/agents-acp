@@ -9,6 +9,8 @@ import {
   JsonRpcPeer,
   normalizeAcpEvent,
   providerEnvironment,
+  readModeDrift,
+  readRequestDetail,
   readSessionModes,
   type AuthMethod,
   type LineTransport,
@@ -72,6 +74,10 @@ test("JSON-RPC peer resolves requests, honors no-timeout turns, and flags invali
   await new Promise((resolve) => setTimeout(resolve, 30));
   transport.emit({ jsonrpc: "2.0", id: 2, result: { stopReason: "end_turn" } });
   assert.deepEqual(await openEnded, { stopReason: "end_turn" });
+
+  // A default-timeout request must still be bounded.
+  const timed = peer.request("initialize", {}, 15);
+  await assert.rejects(timed, /timed out/);
 
   peer.notify("session/cancel", { sessionId: "s1" });
   assert.equal(transport.sent("session/cancel").length, 1);
@@ -139,6 +145,21 @@ test("permission requests relay offered option IDs and Cursor extensions stay di
   const [plan] = normalizeAcpEvent("cursor", { id: 9, method: "cursor/create_plan", params: {} });
   assert.equal(question.type === "permission" && question.kind, "question");
   assert.equal(plan.type === "permission" && plan.kind, "plan");
+});
+
+test("mode drift is read from current_mode_update and mode config options", () => {
+  assert.equal(readModeDrift({
+    method: "session/update",
+    params: { update: { sessionUpdate: "current_mode_update", currentModeId: "agent" } },
+  }), "agent");
+  assert.equal(readModeDrift({
+    method: "session/update",
+    params: { update: { sessionUpdate: "config_option_update", configOption: { category: "mode", currentValue: "code" } } },
+  }), "code");
+  assert.equal(readModeDrift({
+    method: "session/update",
+    params: { update: { sessionUpdate: "agent_message_chunk" } },
+  }), undefined);
 });
 
 test("session modes are read from the ACP SessionModeState object", () => {
@@ -268,6 +289,9 @@ type MockOptions = {
   rejectionMessage?: string;
   stderrOnRejected?: string;
   loadSession?: boolean;
+  driftToMode?: string;
+  outsideWorkspaceWrite?: boolean;
+  protocolVersion?: unknown;
 };
 
 class MockProvider extends AcpProvider {
@@ -331,6 +355,7 @@ class MockProvider extends AcpProvider {
           jsonrpc: "2.0",
           id: message.id,
           result: {
+            protocolVersion: this.options.protocolVersion ?? 1,
             agentCapabilities: { loadSession: this.options.loadSession ?? true },
             authMethods: this.options.authMethods ?? [{ methodId: "cached_token", type: "agent" }],
           },
@@ -368,6 +393,26 @@ class MockProvider extends AcpProvider {
           method: "session/update",
           params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "mocked answer" } } },
         });
+        if (this.options.driftToMode) {
+          this.transport.emit({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: { update: { sessionUpdate: "current_mode_update", currentModeId: this.options.driftToMode } },
+          });
+        }
+        if (this.options.outsideWorkspaceWrite) {
+          this.transport.emit({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              update: {
+                sessionUpdate: "tool_call",
+                kind: "edit",
+                content: [{ type: "diff", path: "/etc/outside.conf", oldText: "a", newText: "b" }],
+              },
+            },
+          });
+        }
         if (this.options.completeBeforePermission) {
           this.transport.emit({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: { options: [{ optionId: "allow-once" }] } });
           this.transport.emit({ jsonrpc: "2.0", id: message.id, result: { stopReason: this.options.stopReason ?? "end_turn" } });
@@ -419,6 +464,8 @@ test("permission stays pending with offered options and cancel uses the ACP noti
   assert.deepEqual(waiting.pendingRequests, [{
     requestId: "rpc-90",
     kind: "permission",
+    description: "Agent requested permission to continue.",
+    detail: undefined,
     options: [{ optionId: "allow-once", name: undefined, kind: "allow_once" }, { optionId: "reject-once", name: undefined, kind: "reject_once" }],
   }]);
   assert.equal(provider.transport.writes.some((line) => JSON.parse(line).id === 90), false);
@@ -481,6 +528,21 @@ test("read-only modes fail closed when no read-only ACP mode is available", asyn
   assert.equal(provider.transport.sent("session/prompt").length, 0);
 });
 
+test("the prompt turn is not bounded by the short request timeout", async () => {
+  const provider = new MockProvider();
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const prompt = provider.transport.writes
+    .map((line) => JSON.parse(line))
+    .find((message) => message.method === "session/prompt");
+  assert.ok(prompt, "session/prompt must be sent");
+  // The turn stays open while a decision is pending rather than timing out.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(controller.status(run.id).status, "waiting_permission");
+  await controller.cancel(run.id);
+});
+
 test("read-only modes select an advertised read-only mode before prompting", async () => {
   const provider = new MockProvider();
   const { workspace, controller } = controllerFor(provider);
@@ -537,6 +599,124 @@ test("resume is refused when the provider does not advertise loadSession", async
   const resumed = controller.resume({ runId: run.id, followUp: "continue" });
   await settle();
   assert.match(String(controller.status(resumed.id).error), /loadSession capability/);
+});
+
+test("pending requests relay tool call titles, question options, and plan steps", () => {
+  const permission = readRequestDetail({
+    id: 1,
+    method: "session/request_permission",
+    params: {
+      toolCall: { title: "Write src/app.ts", kind: "edit", locations: [{ path: "src/app.ts" }] },
+      options: [{ optionId: "allow-once", name: "Allow once" }],
+    },
+  });
+  assert.deepEqual(permission, {
+    toolCallTitle: "Write src/app.ts",
+    toolKind: "edit",
+    locations: ["src/app.ts"],
+  });
+  const [permissionEvent] = normalizeAcpEvent("cursor", {
+    id: 1,
+    method: "session/request_permission",
+    params: { toolCall: { title: "Write src/app.ts" }, options: [{ optionId: "allow-once", name: "Allow once" }] },
+  });
+  assert.equal(permissionEvent.type === "permission" && permissionEvent.description, "Agent requested permission for: Write src/app.ts");
+  assert.deepEqual(
+    permissionEvent.type === "permission" ? permissionEvent.options : undefined,
+    [{ optionId: "allow-once", name: "Allow once", kind: undefined }],
+  );
+
+  assert.deepEqual(readRequestDetail({
+    id: 2,
+    method: "cursor/ask_question",
+    params: {
+      title: "Need input",
+      questions: [{ id: "q1", prompt: "Which mode?", allowMultiple: false, options: [{ id: "agent", label: "Agent" }] }],
+    },
+  }), {
+    title: "Need input",
+    questions: [{
+      questionId: "q1",
+      prompt: "Which mode?",
+      allowMultiple: false,
+      options: [{ optionId: "agent", label: "Agent" }],
+    }],
+  });
+
+  assert.deepEqual(readRequestDetail({
+    id: 3,
+    method: "cursor/create_plan",
+    params: {
+      name: "Refactor",
+      overview: "Tighten layout",
+      plan: "1. Inspect\n2. Update",
+      todos: [{ id: "todo-1", content: "Inspect sizing", status: "pending" }],
+    },
+  }), {
+    name: "Refactor",
+    overview: "Tighten layout",
+    plan: "1. Inspect 2. Update",
+    steps: [{ id: "todo-1", content: "Inspect sizing", status: "pending" }],
+  });
+});
+
+test("mid-turn mode drift aborts a read-only run", async () => {
+  const provider = new MockProvider({ driftToMode: "agent" });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "review" });
+  await settle();
+  const status = controller.status(run.id);
+  assert.equal(status.status, "failed");
+  assert.match(String(status.error), /switched the session to mode "agent"/);
+});
+
+test("mid-turn mode drift within acceptable read-only modes continues", async () => {
+  const provider = new MockProvider({ driftToMode: "plan" });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "review" });
+  await settle();
+  assert.equal(controller.status(run.id).status, "waiting_permission");
+  await controller.cancel(run.id);
+});
+
+test("file changes outside the workspace are flagged and block clean success", async () => {
+  const provider = new MockProvider({ stopReason: "end_turn", outsideWorkspaceWrite: true });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const result = controller.result(run.id);
+  assert.equal(result.status, "failed");
+  assert.match(String(result.error), /outside the authorized workspace/);
+  assert.deepEqual(result.changedFiles, []);
+  assert.equal((result.outsideWorkspaceWrites as string[]).length, 1);
+});
+
+test("an unsupported ACP protocol version fails the run closed", async () => {
+  const provider = new MockProvider({ protocolVersion: 0 });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  assert.match(String(controller.status(run.id).error), /unsupported ACP protocol version/);
+});
+
+test("a failing run store degrades the run without breaking run control", async () => {
+  const provider = new MockProvider();
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-controller-"));
+  const store = new RunStore(join(workspace, "runs.json"));
+  const controller = new RunController(store, new WorkspacePolicy(workspace), { providers: [provider] });
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+
+  const broken = new Error("simulated store outage");
+  store.update = () => { throw broken; };
+  store.appendEvent = () => { throw broken; };
+
+  // Run control must still reach a terminal state and report the degradation.
+  const cancelled = await controller.cancel(run.id);
+  assert.ok(cancelled);
+  const status = controller.status(run.id);
+  assert.equal(status.status, "cancelled");
+  assert.match(String(status.storeDegraded), /Run persistence failed/);
 });
 
 test("controller terminates a provider that completes while permission remains pending", async () => {

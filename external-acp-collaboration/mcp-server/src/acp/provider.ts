@@ -77,7 +77,8 @@ export interface LineTransport {
   onLine(listener: (line: string) => void): void;
   onStderr(listener: (chunk: string) => void): void;
   onExit(listener: (code: number | null, errorCode?: string) => void): void;
-  terminate(): void;
+  /** `graceMs > 0` escalates to SIGKILL synchronously before returning. */
+  terminate(graceMs?: number): void;
 }
 
 export class ChildProcessTransport implements LineTransport {
@@ -107,15 +108,36 @@ export class ChildProcessTransport implements LineTransport {
     this.child.stdin.on("error", (error: NodeJS.ErrnoException) => listener(null, error.code));
   }
 
-  terminate(): void {
+  terminate(graceMs = 0): void {
     if (this.terminated) return;
     this.terminated = true;
     // The provider may have spawned its own tool subprocesses; signal the whole
     // detached process group so nothing is left running after cancellation.
     this.signal("SIGTERM");
+    if (graceMs > 0) {
+      // Used on client shutdown, where the event loop will not run again.
+      const deadline = Date.now() + graceMs;
+      while (Date.now() < deadline && this.isAlive()) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+      if (this.isAlive()) this.signal("SIGKILL");
+      return;
+    }
     const escalation = setTimeout(() => this.signal("SIGKILL"), 3_000);
     escalation.unref?.();
     this.child.once("exit", () => clearTimeout(escalation));
+  }
+
+  private isAlive(): boolean {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return false;
+    const pid = this.child.pid;
+    if (pid === undefined) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
   }
 
   private signal(signal: NodeJS.Signals): void {
@@ -245,8 +267,8 @@ export class JsonRpcPeer {
     }
   }
 
-  terminate(): void {
-    this.transport.terminate();
+  terminate(graceMs = 0): void {
+    this.transport.terminate(graceMs);
   }
 
   private receive(line: string): void {
@@ -528,13 +550,119 @@ function readFileChanges(update: Record<string, unknown>): RunEvent[] {
 }
 
 function permissionTitle(params: Record<string, unknown>): string {
+  const title = readToolCallTitle(params);
+  return title ? `Agent requested permission for: ${title}` : "Agent requested permission to continue.";
+}
+
+function readToolCallTitle(params: Record<string, unknown>): string | undefined {
   const toolCall = params.toolCall;
-  const title = toolCall && typeof toolCall === "object"
-    ? (toolCall as { title?: unknown }).title
-    : undefined;
-  return typeof title === "string" && title.trim()
-    ? "Agent requested permission for a tool call."
-    : "Agent requested permission to continue.";
+  if (!toolCall || typeof toolCall !== "object") return undefined;
+  const title = (toolCall as { title?: unknown }).title;
+  return typeof title === "string" && title.trim() ? safeText(title, 200) : undefined;
+}
+
+/**
+ * Detail shown to the caller so a decision is not made blind. It is kept in
+ * memory only and never written to the run store.
+ */
+export function readRequestDetail(message: RpcMessage): Record<string, unknown> | undefined {
+  const params = message.params ?? {};
+  if (message.method === "session/request_permission") {
+    const title = readToolCallTitle(params);
+    const toolCall = params.toolCall && typeof params.toolCall === "object"
+      ? params.toolCall as Record<string, unknown>
+      : undefined;
+    const detail: Record<string, unknown> = {};
+    if (title) detail.toolCallTitle = title;
+    if (typeof toolCall?.kind === "string") detail.toolKind = safeText(toolCall.kind, 64);
+    const locations = Array.isArray(toolCall?.locations) ? toolCall?.locations : [];
+    const paths = locations.flatMap((location) => (
+      location && typeof location === "object" && typeof (location as { path?: unknown }).path === "string"
+        ? [safeText((location as { path: string }).path, 512)]
+        : []
+    )).slice(0, 20);
+    if (paths.length > 0) detail.locations = paths;
+    return Object.keys(detail).length > 0 ? detail : undefined;
+  }
+
+  if (message.method === "cursor/ask_question") {
+    const questions = Array.isArray(params.questions) ? params.questions : [];
+    const parsed = questions.slice(0, 10).flatMap((question) => {
+      if (!question || typeof question !== "object") return [];
+      const candidate = question as { id?: unknown; prompt?: unknown; options?: unknown; allowMultiple?: unknown };
+      if (typeof candidate.id !== "string") return [];
+      const options = Array.isArray(candidate.options) ? candidate.options : [];
+      return [{
+        questionId: safeText(candidate.id, 128),
+        prompt: typeof candidate.prompt === "string" ? safeText(candidate.prompt, 500) : undefined,
+        allowMultiple: candidate.allowMultiple === true,
+        options: options.slice(0, 20).flatMap((option) => {
+          if (!option || typeof option !== "object") return [];
+          const entry = option as { id?: unknown; label?: unknown };
+          if (typeof entry.id !== "string") return [];
+          return [{
+            optionId: safeText(entry.id, 128),
+            label: typeof entry.label === "string" ? safeText(entry.label, 200) : undefined,
+          }];
+        }),
+      }];
+    });
+    const title = typeof params.title === "string" ? safeText(params.title, 200) : undefined;
+    return parsed.length > 0 || title ? { title, questions: parsed } : undefined;
+  }
+
+  if (message.method === "cursor/create_plan") {
+    const todos = Array.isArray(params.todos) ? params.todos : [];
+    const detail: Record<string, unknown> = {};
+    if (typeof params.name === "string") detail.name = safeText(params.name, 200);
+    if (typeof params.overview === "string") detail.overview = safeText(params.overview, 1_000);
+    if (typeof params.plan === "string") detail.plan = safeText(params.plan, 4_000);
+    const steps = todos.slice(0, 50).flatMap((todo) => {
+      if (!todo || typeof todo !== "object") return [];
+      const entry = todo as { id?: unknown; content?: unknown; status?: unknown };
+      if (typeof entry.content !== "string") return [];
+      return [{
+        id: typeof entry.id === "string" ? safeText(entry.id, 128) : undefined,
+        content: safeText(entry.content, 300),
+        status: typeof entry.status === "string" ? safeText(entry.status, 32) : undefined,
+      }];
+    });
+    if (steps.length > 0) detail.steps = steps;
+    return Object.keys(detail).length > 0 ? detail : undefined;
+  }
+  return undefined;
+}
+
+/** Returns the new mode when the agent changes it mid-turn. */
+export function readModeDrift(message: RpcMessage): string | undefined {
+  if (message.method !== "session/update") return undefined;
+  const update = (message.params?.update ?? {}) as Record<string, unknown>;
+  if (update.sessionUpdate === "current_mode_update" && typeof update.currentModeId === "string") {
+    return update.currentModeId;
+  }
+  if (update.sessionUpdate === "config_option_update") {
+    const option = update.configOption ?? update.option;
+    if (option && typeof option === "object") {
+      const candidate = option as { category?: unknown; currentValue?: unknown };
+      if (candidate.category === "mode" && typeof candidate.currentValue === "string") return candidate.currentValue;
+    }
+  }
+  return undefined;
+}
+
+/** ACP v1 negotiates an integer protocol version. */
+export function validateProtocolVersion(initialized: Record<string, unknown>): string | undefined {
+  const version = initialized.protocolVersion;
+  if (version === undefined || version === null) return undefined;
+  const numeric = typeof version === "number" ? version : Number(version);
+  if (!Number.isFinite(numeric) || numeric < 1) {
+    return `The provider advertised an unsupported ACP protocol version (${String(version).slice(0, 32)}).`;
+  }
+  return undefined;
+}
+
+function safeText(value: string, maximumLength: number): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, maximumLength);
 }
 
 export function readPermissionOptions(value: unknown): PermissionOption[] {
@@ -544,9 +672,9 @@ export function readPermissionOptions(value: unknown): PermissionOption[] {
     const candidate = option as { optionId?: unknown; name?: unknown; kind?: unknown };
     if (typeof candidate.optionId !== "string") return [];
     return [{
-      optionId: candidate.optionId,
-      name: typeof candidate.name === "string" ? candidate.name : undefined,
-      kind: typeof candidate.kind === "string" ? candidate.kind : undefined,
+      optionId: candidate.optionId.slice(0, 128),
+      name: typeof candidate.name === "string" ? safeText(candidate.name, 200) : undefined,
+      kind: typeof candidate.kind === "string" ? safeText(candidate.kind, 64) : undefined,
     }];
   });
 }

@@ -10,8 +10,11 @@ import {
   AUTH_REQUIRED_CODE,
   JsonRpcPeer,
   normalizeAcpEvent,
+  readModeDrift,
+  readRequestDetail,
   readSessionModes,
   readStopReason,
+  validateProtocolVersion,
   type AuthMethod,
   type PendingRequestKind,
   type PermissionOption,
@@ -22,12 +25,13 @@ import {
   type TaskMode,
 } from "./acp/provider.ts";
 import { WorkspacePolicy } from "./policy.ts";
-import { RunStore, type RunRecord } from "./run-store.ts";
+import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
 
-const CLIENT_VERSION = "0.2.0";
+const CLIENT_VERSION = "0.2.1";
 const SHORT_TIMEOUT_MS = 30_000;
 const CANCEL_TIMEOUT_MS = 5_000;
+const SHUTDOWN_GRACE_MS = 750;
 
 export type StartRequest = {
   provider: ProviderName;
@@ -55,7 +59,9 @@ type LifecycleStage =
 type PendingRequest = {
   message: RpcMessage;
   kind: PendingRequestKind;
+  description: string;
   options: PermissionOption[];
+  detail?: Record<string, unknown>;
 };
 
 type RuntimeRun = {
@@ -73,6 +79,12 @@ type RuntimeRun = {
   stage: LifecycleStage;
   preauthenticatedSessionAttempted: boolean;
   cancelRequested: boolean;
+  /** Authoritative status, so a failing run store cannot break run control. */
+  status: RunStatus;
+  acceptableModes: string[];
+  /** Drift is only enforced once negotiation has confirmed a mode. */
+  modeConfirmed: boolean;
+  outsideWorkspaceWrites: string[];
   runTimeout?: NodeJS.Timeout;
   idleTimeout?: NodeJS.Timeout;
 };
@@ -93,6 +105,8 @@ export class RunController {
   private readonly envMode: EnvMode;
   private readonly envPassthrough: string[];
   private readonly runtime = new Map<string, RuntimeRun>();
+  private storeFailures = 0;
+  private lastStoreFailure?: string;
 
   constructor(store: RunStore, policy: WorkspacePolicy, options: ControllerOptions = {}) {
     this.store = store;
@@ -150,6 +164,10 @@ export class RunController {
         stage: "spawn",
         preauthenticatedSessionAttempted: false,
         cancelRequested: false,
+        status: "starting",
+        acceptableModes: ACCEPTABLE_MODES[request.mode],
+        modeConfirmed: false,
+        outsideWorkspaceWrites: [],
       };
       runtime.peer = new JsonRpcPeer(
         transport,
@@ -178,16 +196,23 @@ export class RunController {
     const runtime = this.runtime.get(id);
     return {
       ...record,
+      status: runtime?.status ?? record.status,
       error: runtime?.error ?? record.error,
       stage: runtime?.stage,
       authMethods: runtime?.authMethodsSummary,
       diagnostic: runtime?.stderrTail,
+      storeDegraded: this.storeDegraded(),
+      outsideWorkspaceWrites: runtime?.outsideWorkspaceWrites.length
+        ? runtime.outsideWorkspaceWrites
+        : record.outsideWorkspaceWrites ? ["reported"] : undefined,
       elapsedMs: Date.now() - new Date(record.startedAt).getTime(),
       liveEvents: runtime?.events.slice(-30) ?? [],
       pendingRequests: [...(runtime?.pendingRequests.entries() ?? [])].map(([requestId, pending]) => ({
         requestId,
         kind: pending.kind,
+        description: pending.description,
         options: pending.options,
+        detail: pending.detail,
       })),
     };
   }
@@ -195,38 +220,58 @@ export class RunController {
   result(id: string): Record<string, unknown> {
     const record = this.store.get(id);
     const runtime = this.runtime.get(id);
+    const status = runtime?.status ?? record.status;
     return {
       runId: id,
-      status: record.status,
+      status,
       stopReason: record.completed?.stopReason,
-      summary: runtime?.resultText || (record.status === "completed"
+      summary: runtime?.resultText || (status === "completed"
         ? "The provider completed. Transcript text is available only while the local MCP server remains running."
         : undefined),
       changedFiles: record.changedFiles,
+      outsideWorkspaceWrites: runtime?.outsideWorkspaceWrites.length ? runtime.outsideWorkspaceWrites : undefined,
       error: runtime?.error ?? record.error,
+      storeDegraded: this.storeDegraded(),
       verificationAdvice: "Review the changed-file summary and run project-specific checks before adopting edits.",
     };
   }
 
+  /** Terminates every live provider process group. Used on client shutdown. */
+  shutdown(reason: string): void {
+    for (const [id, runtime] of this.runtime) {
+      if (isTerminal(runtime.status)) continue;
+      runtime.cancelRequested = true;
+      try {
+        const sessionId = this.store.get(id).sessionId;
+        if (sessionId) runtime.peer.notify("session/cancel", { sessionId });
+      } catch {
+        // The store may be unavailable during shutdown; terminate anyway.
+      }
+      this.setStatus(id, runtime, "cancelled", { error: `ACP run stopped: ${reason}` });
+      this.policy.release(runtime.workspace, runtime.mode);
+      this.finishRuntime(runtime, SHUTDOWN_GRACE_MS);
+    }
+  }
+
   async cancel(id: string): Promise<RunRecord> {
     const record = this.store.get(id);
-    if (isTerminal(record.status)) return record;
-    const runtime = this.requireRuntime(id);
+    const runtime = this.runtime.get(id);
+    if (isTerminal(runtime?.status ?? record.status)) return record;
+    if (!runtime) throw new Error("The run is not active in this MCP server process.");
     runtime.cancelRequested = true;
     runtime.stage = "cancel";
     // ACP defines session/cancel as a notification; the agent answers the
     // in-flight prompt with stopReason "cancelled".
     if (record.sessionId) runtime.peer.notify("session/cancel", { sessionId: record.sessionId });
     this.rejectPendingRequests(runtime);
-    await this.waitForTerminal(id, CANCEL_TIMEOUT_MS);
+    await this.waitForTerminal(runtime, CANCEL_TIMEOUT_MS);
 
-    const latest = this.store.get(id);
-    const cancelled = isTerminal(latest.status) && latest.status !== "failed"
-      ? latest
-      : this.store.update(id, { status: "cancelled" });
+    if (!isTerminal(runtime.status) || runtime.status === "failed") {
+      this.setStatus(id, runtime, "cancelled");
+    }
     this.policy.release(runtime.workspace, runtime.mode);
     this.finishRuntime(runtime);
-    return cancelled;
+    return this.store.get(id);
   }
 
   resume(input: {
@@ -290,7 +335,7 @@ export class RunController {
     // Clear the gate before replying: a fast provider can complete its prompt
     // synchronously once it receives this response.
     runtime.pendingRequests.delete(requestId);
-    if (runtime.pendingRequests.size === 0) this.store.update(id, { status: "running" });
+    if (runtime.pendingRequests.size === 0) this.setStatus(id, runtime, "running");
     this.resetIdleTimer(id);
     runtime.peer.respond(pending.message.id, response);
     return this.store.get(id);
@@ -300,9 +345,8 @@ export class RunController {
     runtime: RuntimeRun;
     pending: PendingRequest;
   } {
-    const record = this.store.get(id);
-    if (isTerminal(record.status)) throw new Error("Cannot respond to a terminal run.");
     const runtime = this.requireRuntime(id);
+    if (isTerminal(runtime.status)) throw new Error("Cannot respond to a terminal run.");
     const pending = runtime.pendingRequests.get(requestId);
     if (!pending) throw new Error(`No pending request with ID ${requestId}.`);
     if (pending.kind !== kind) throw new Error(`Request ${requestId} expects a ${pending.kind} response.`);
@@ -319,6 +363,8 @@ export class RunController {
         clientInfo: { name: "agents-acp", version: CLIENT_VERSION },
       }, SHORT_TIMEOUT_MS);
       if (!this.isActive(id)) return;
+      const versionProblem = validateProtocolVersion(initialized);
+      if (versionProblem) throw new Error(versionProblem);
       runtime.authMethodsSummary = summarizeAuthMethods(initialized);
 
       const session = await this.openSession(id, runtime, request, initialized);
@@ -327,12 +373,13 @@ export class RunController {
         ? session.sessionId
         : request.sessionId;
       if (!sessionId) throw new Error("ACP provider did not return a session ID.");
-      this.store.update(id, { sessionId, status: "running" });
+      this.setStatus(id, runtime, "running", { sessionId });
       this.acceptEvent(id, { type: "started", provider: request.provider, sessionId });
 
       runtime.stage = "mode";
       await this.selectMode(id, runtime, sessionId, request.mode, session);
       if (!this.isActive(id)) return;
+      runtime.modeConfirmed = true;
 
       runtime.stage = "session/prompt";
       // A prompt turn is open-ended; the run and idle watchdogs bound it.
@@ -459,7 +506,7 @@ export class RunController {
       return;
     }
     if (stopReason === "cancelled" || runtime.cancelRequested) {
-      this.store.update(id, { status: "cancelled", completed: { stopReason: stopReason ?? "cancelled" } });
+      this.setStatus(id, runtime, "cancelled", { completed: { stopReason: stopReason ?? "cancelled" } });
       this.policy.release(runtime.workspace, runtime.mode);
       this.finishRuntime(runtime);
       return;
@@ -468,8 +515,19 @@ export class RunController {
       this.fail(id, new Error(unsuccessfulStopReason(stopReason)), undefined, stopReason);
       return;
     }
+    if (runtime.outsideWorkspaceWrites.length > 0) {
+      // The provider announced writes outside the authorized workspace, so
+      // this turn must never be reported as a clean success.
+      this.fail(
+        id,
+        new Error(`The provider reported ${runtime.outsideWorkspaceWrites.length} file change(s) outside the authorized workspace. Inspect the affected paths before trusting this run.`),
+        undefined,
+        stopReason,
+      );
+      return;
+    }
     this.acceptEvent(id, { type: "completed", summary: "Provider completed." });
-    this.store.update(id, { completed: { stopReason } });
+    this.setStatus(id, runtime, "completed", { completed: { stopReason } });
     this.policy.release(runtime.workspace, runtime.mode);
     this.finishRuntime(runtime);
     this.pruneRuntime();
@@ -478,11 +536,26 @@ export class RunController {
   private handleProviderMessage(id: string, message: RpcMessage, isRequest: boolean): void {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
+    // A late message must never resurrect a terminal run or overwrite its cause.
+    if (isTerminal(runtime.status)) {
+      if (isRequest && message.id !== undefined) {
+        runtime.peer.respond(message.id, { outcome: { outcome: "cancelled" } });
+      }
+      return;
+    }
     if (message.method === "acp/invalid_message") {
       this.abort(id, new Error("Provider emitted an invalid ACP JSON-RPC envelope."));
       return;
     }
     this.resetIdleTimer(id);
+
+    const drift = readModeDrift(message);
+    if (drift && runtime.modeConfirmed && !runtime.acceptableModes.includes(drift)) {
+      // The agent switched itself into a mode this task never authorized.
+      this.abort(id, new Error(`The provider switched the session to mode "${drift}", which is not acceptable for a ${runtime.mode} task (allowed: ${runtime.acceptableModes.join(", ")}).`));
+      return;
+    }
+
     const events = normalizeAcpEvent(runtime.provider.name, message);
     for (const event of events) this.acceptEvent(id, event);
 
@@ -492,9 +565,11 @@ export class RunController {
       runtime.pendingRequests.set(gate.requestId, {
         message,
         kind: gate.kind,
+        description: gate.description,
         options: gate.options ?? [],
+        detail: readRequestDetail(message),
       });
-      this.store.update(id, { status: "waiting_permission" });
+      this.setStatus(id, runtime, "waiting_permission");
       this.clearIdleTimer(runtime);
       return;
     }
@@ -527,8 +602,8 @@ export class RunController {
   private acceptEvent(id: string, event: RunEvent): void {
     const runtime = this.runtime.get(id);
     if (!runtime) return;
-    if (!this.isActive(id) && event.type !== "completed") return;
-    const safeEvent = sanitizeEvent(event, runtime.workspace);
+    if (isTerminal(runtime.status) && event.type !== "completed") return;
+    const safeEvent = this.sanitizeEvent(runtime, event);
     if (!safeEvent) return;
     runtime.events.push(safeEvent);
     if (runtime.events.length > 500) runtime.events.splice(0, runtime.events.length - 500);
@@ -538,15 +613,27 @@ export class RunController {
       runtime.error = diagnostic;
       safeEvent.message = diagnostic;
     }
-    this.store.appendEvent(id, safeEvent);
+    this.persist(() => this.store.appendEvent(id, safeEvent));
+  }
+
+  /**
+   * A file change outside the workspace is never silently dropped: it is
+   * flagged so the run cannot be reported as a clean success.
+   */
+  private sanitizeEvent(runtime: RuntimeRun, event: RunEvent): RunEvent | undefined {
+    if (event.type !== "file_change") return event;
+    const relative = workspaceRelativePath(runtime.workspace, event.path);
+    if (relative !== undefined) return { ...event, path: relative };
+    const label = `ACP boundary: the provider reported a ${event.kind} outside the workspace.`;
+    if (!runtime.outsideWorkspaceWrites.includes(label)) runtime.outsideWorkspaceWrites.push(label);
+    return { type: "activity", label };
   }
 
   private handleExit(id: string, code: number | null, errorCode?: string): void {
     const runtime = this.runtime.get(id);
-    if (!runtime) return;
-    if (isTerminal(this.store.get(id).status)) return;
+    if (!runtime || isTerminal(runtime.status)) return;
     if (runtime.cancelRequested) {
-      this.store.update(id, { status: "cancelled" });
+      this.setStatus(id, runtime, "cancelled");
       this.policy.release(runtime.workspace, runtime.mode);
       this.finishRuntime(runtime);
       return;
@@ -560,22 +647,46 @@ export class RunController {
   }
 
   private fail(id: string, error: unknown, fallbackStage: LifecycleStage = "spawn", stopReason?: StopReason): void {
-    const record = this.store.get(id);
-    if (isTerminal(record.status)) return;
     const runtime = this.runtime.get(id);
+    if (runtime ? isTerminal(runtime.status) : isTerminal(this.store.get(id).status)) return;
     const diagnostic = runtime
       ? this.describe(runtime, error)
       : describeFailure(fallbackStage, error);
     // Record the terminal state before touching the process, so the exit
     // callback cannot replace the real cause with "process exited".
-    this.store.update(id, { status: "failed", error: diagnostic, completed: stopReason ? { stopReason } : undefined });
-    this.store.appendEvent(id, { type: "error", message: diagnostic });
     if (runtime) {
+      runtime.status = "failed";
       runtime.error = diagnostic;
       runtime.prompt = undefined;
+    }
+    this.persist(() => {
+      this.store.update(id, { status: "failed", error: diagnostic, completed: stopReason ? { stopReason } : undefined });
+      this.store.appendEvent(id, { type: "error", message: diagnostic });
+    });
+    if (runtime) {
       this.policy.release(runtime.workspace, runtime.mode);
       this.rejectPendingRequests(runtime);
       this.finishRuntime(runtime);
+    }
+  }
+
+  private setStatus(
+    id: string,
+    runtime: RuntimeRun,
+    status: RunStatus,
+    extra: Partial<Omit<RunRecord, "id" | "events" | "changedFiles">> = {},
+  ): void {
+    runtime.status = status;
+    this.persist(() => this.store.update(id, { status, ...extra }));
+  }
+
+  /** Persistence is best-effort: a store failure degrades a run, not the server. */
+  private persist(operation: () => void): void {
+    try {
+      operation();
+    } catch (error) {
+      this.storeFailures += 1;
+      this.lastStoreFailure = redactSecrets(error instanceof Error ? error.message : "unknown run store error").slice(0, 200);
     }
   }
 
@@ -599,10 +710,10 @@ export class RunController {
     runtime.pendingRequests.clear();
   }
 
-  private async waitForTerminal(id: string, timeoutMs: number): Promise<void> {
+  private async waitForTerminal(runtime: RuntimeRun, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (isTerminal(this.store.get(id).status)) return;
+      if (isTerminal(runtime.status)) return;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
@@ -614,7 +725,15 @@ export class RunController {
   }
 
   private isActive(id: string): boolean {
-    return !isTerminal(this.store.get(id).status);
+    const runtime = this.runtime.get(id);
+    return runtime ? !isTerminal(runtime.status) : !isTerminal(this.store.get(id).status);
+  }
+
+  private storeDegraded(): string | undefined {
+    if (this.storeFailures > 0) {
+      return `Run persistence failed ${this.storeFailures} time(s); live state is authoritative (${this.lastStoreFailure ?? "unknown"}).`;
+    }
+    return this.store.degraded;
   }
 
   private schedule(action: () => void, delayMs: number): NodeJS.Timeout {
@@ -638,16 +757,16 @@ export class RunController {
     runtime.idleTimeout = undefined;
   }
 
-  private finishRuntime(runtime: RuntimeRun): void {
+  private finishRuntime(runtime: RuntimeRun, graceMs = 0): void {
     if (runtime.runTimeout) clearTimeout(runtime.runTimeout);
     runtime.runTimeout = undefined;
     this.clearIdleTimer(runtime);
     runtime.prompt = undefined;
-    runtime.peer.terminate();
+    runtime.peer.terminate(graceMs);
   }
 
   private pruneRuntime(): void {
-    const terminal = [...this.runtime.entries()].filter(([id]) => isTerminal(this.store.get(id).status));
+    const terminal = [...this.runtime.entries()].filter(([, runtime]) => isTerminal(runtime.status));
     while (this.runtime.size > 200 && terminal.length > 0) {
       const [id] = terminal.shift() as [string, RuntimeRun];
       this.runtime.delete(id);
@@ -656,8 +775,13 @@ export class RunController {
 
   private captureStderr(id: string, chunk: string): void {
     const runtime = this.runtime.get(id);
-    if (!runtime || isTerminal(this.store.get(id).status)) return;
-    const sanitized = sanitizeDiagnosticText(chunk, runtime.workspace, runtime.prompt);
+    if (!runtime || isTerminal(runtime.status)) return;
+    const meaningful = chunk
+      .split(/\r?\n/)
+      .filter((line) => line.trim() && !/ExperimentalWarning|--trace-warnings/.test(line))
+      .join(" ");
+    if (!meaningful) return;
+    const sanitized = sanitizeDiagnosticText(meaningful, runtime.workspace, runtime.prompt);
     runtime.stderrTail = `${runtime.stderrTail ?? ""} ${sanitized}`.slice(-2_000).trim();
   }
 }
@@ -699,13 +823,12 @@ function unsuccessfulStopReason(stopReason: StopReason | undefined): string {
   }
 }
 
-function sanitizeEvent(event: RunEvent, workspace: string): RunEvent | undefined {
-  if (event.type !== "file_change") return event;
-  if (event.path.includes("\0")) return undefined;
-  const absolute = path.resolve(workspace, event.path);
+function workspaceRelativePath(workspace: string, candidate: string): string | undefined {
+  if (candidate.includes("\0")) return undefined;
+  const absolute = path.resolve(workspace, candidate);
   const relative = path.relative(workspace, absolute);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
-  return { ...event, path: relative || "." };
+  return relative || ".";
 }
 
 function summarizeAuthMethods(initialized: Record<string, unknown>): string | undefined {
@@ -764,11 +887,9 @@ export function describeFailure(
 export function sanitizeDiagnosticText(value: string, workspace?: string, prompt?: string): string {
   let result = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
   if (prompt) result = result.split(prompt).join("[REDACTED PROMPT]");
-  result = result
-    .replace(/\b(bearer)\s+\S+/gi, "$1 [REDACTED]")
-    .replace(/\b[A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*\s*[:=]\s*\S+/gi, "[REDACTED CREDENTIAL]")
-    .replace(/\b(authorization)\b\s*[:=]\s*\S+/gi, "$1=[REDACTED]");
-  result = result.replace(/\/[^\s"'`]+/g, (candidate) => redactPath(candidate, workspace));
+  // Paths are folded first so a workspace path cannot be mistaken for a secret.
+  result = result.replace(/(?:[A-Za-z]:)?\/[^\s"'`,;]+/g, (candidate) => redactPath(candidate, workspace));
+  result = redactSecrets(result);
   return result || "Provider returned no diagnostic text.";
 }
 

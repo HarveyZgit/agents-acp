@@ -1,4 +1,13 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -18,6 +27,7 @@ export type RunRecord = {
   updatedAt: string;
   lastActivity?: string;
   changedFiles: Array<{ path: string; kind: "create" | "modify" | "delete" }>;
+  outsideWorkspaceWrites?: boolean;
   error?: string;
   completed?: { exitCode?: number; stopReason?: string };
   events: Array<Exclude<RunEvent, { type: "text" }>>;
@@ -25,14 +35,25 @@ export type RunRecord = {
 
 type StoreData = { runs: RunRecord[] };
 
+/** Bounded to roughly 300ms so a contended lock degrades instead of stalling. */
+const LOCK_ATTEMPTS = 12;
+const LOCK_BACKOFF_MS = [1, 2, 3, 5, 8, 13, 21, 34, 55];
+const STALE_LOCK_MS = 30_000;
+
 export class RunStore {
   private readonly filePath: string;
   private data: StoreData;
+  private degradedReason?: string;
 
   constructor(filePath = join(homedir(), ".codex", "agents-acp", "runs.json")) {
     this.filePath = filePath;
     this.data = this.load();
     this.reconcileInterruptedRuns();
+  }
+
+  /** Non-empty when the on-disk store is unusable and runs are memory-only. */
+  get degraded(): string | undefined {
+    return this.degradedReason;
   }
 
   create(input: Pick<RunRecord, "provider" | "cwd" | "workspace" | "mode">): RunRecord {
@@ -61,14 +82,14 @@ export class RunStore {
   }
 
   get(id: string): RunRecord {
-    this.data = this.load();
+    this.refresh();
     const record = this.data.runs.find((run) => run.id === id);
     if (!record) throw new Error(`Unknown run: ${id}`);
     return structuredClone(record);
   }
 
   findBySession(provider: ProviderName, sessionId: string): RunRecord | undefined {
-    this.data = this.load();
+    this.refresh();
     const record = this.data.runs.find((run) => run.provider === provider && run.sessionId === sessionId);
     return record && structuredClone(record);
   }
@@ -82,14 +103,13 @@ export class RunStore {
   }
 
   appendEvent(id: string, event: RunEvent): RunRecord {
+    // Streamed text is never persisted, so it must not trigger a lock or a
+    // full store rewrite on every chunk.
+    if (event.type === "text") return this.get(id);
     return this.mutate(() => {
       const record = this.require(id);
-      // Text can contain user-provided material echoed by a provider. Keep it
-      // in the in-memory controller only; never persist it to the session file.
-      if (event.type !== "text") {
-        record.events.push(persistedEvent(event));
-        if (record.events.length > 500) record.events.splice(0, record.events.length - 500);
-      }
+      record.events.push(persistedEvent(event));
+      if (record.events.length > 500) record.events.splice(0, record.events.length - 500);
       if (event.type === "activity") record.lastActivity = safeLabel(event.label);
       if (event.type === "file_change" && record.changedFiles.length < 500) {
         record.changedFiles.push({ path: event.path, kind: event.kind });
@@ -105,10 +125,10 @@ export class RunStore {
   }
 
   listActiveImplementRuns(workspace: string): RunRecord[] {
-    this.data = this.load();
+    this.refresh();
     this.reconcileInterruptedRuns();
     return this.data.runs
-      .filter((run) => run.workspace === workspace && run.mode === "implement" && ["starting", "running", "waiting_permission"].includes(run.status))
+      .filter((run) => run.workspace === workspace && run.mode === "implement" && isActive(run.status))
       .map((run) => structuredClone(run));
   }
 
@@ -118,54 +138,118 @@ export class RunStore {
     return record;
   }
 
+  /** A read failure must never break an in-flight run; keep memory state. */
+  private refresh(): void {
+    try {
+      this.data = this.load();
+      this.degradedReason = undefined;
+    } catch (error) {
+      this.degradedReason = `Run store is unreadable; using in-memory state (${(error as Error).message}).`;
+    }
+  }
+
   private load(): StoreData {
     try {
       const parsed = JSON.parse(readFileSync(this.filePath, "utf8")) as StoreData;
       if (!Array.isArray(parsed.runs)) throw new Error("Invalid run store format.");
       return { runs: parsed.runs.filter(validRunRecord).map(sanitizeRunRecord) };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return { runs: [] };
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return { runs: [] };
+      if (error instanceof SyntaxError || code === undefined) {
+        // A corrupt file must not wedge the server: quarantine and restart empty.
+        this.quarantine();
+        return { runs: [] };
+      }
+      throw error;
+    }
+  }
+
+  private quarantine(): void {
+    try {
+      renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+      this.degradedReason = "The previous run store was corrupt and was moved aside.";
+    } catch {
+      this.degradedReason = "The previous run store was corrupt and could not be moved aside.";
     }
   }
 
   private mutate<T>(operation: () => T): T {
     const lock = this.acquireLock();
     try {
-      this.data = this.load();
+      this.refresh();
       const result = operation();
       this.saveUnlocked();
       return result;
     } finally {
-      closeSync(lock);
-      unlinkSync(`${this.filePath}.lock`);
+      this.releaseLock(lock);
     }
   }
 
   private saveUnlocked(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, JSON.stringify(this.data, null, 2), { mode: 0o600 });
-    renameSync(temporary, this.filePath);
+    try {
+      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+      renameSync(temporary, this.filePath);
+      this.degradedReason = undefined;
+    } catch (error) {
+      // Persistence is best-effort; the live run continues from memory.
+      this.degradedReason = `Run store is not writable; state is in-memory only (${(error as Error).message}).`;
+    }
   }
 
-  private acquireLock(): number {
-    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+  private acquireLock(): number | undefined {
     const lockPath = `${this.filePath}.lock`;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+    } catch {
+      return undefined;
+    }
+    for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
       try {
         const descriptor = openSync(lockPath, "wx", 0o600);
         writeFileSync(descriptor, String(process.pid));
         return descriptor;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 1) {
-          throw new Error("Run store is busy; retry the request.");
-        }
-        const owner = Number(readFileSync(lockPath, "utf8"));
-        if (!Number.isInteger(owner) || !isProcessAlive(owner)) unlinkSync(lockPath);
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return undefined;
+        if (this.reclaimStaleLock(lockPath)) continue;
+        sleep(LOCK_BACKOFF_MS[Math.min(attempt, LOCK_BACKOFF_MS.length - 1)]);
       }
     }
-    throw new Error("Run store is busy; retry the request.");
+    // Proceeding unlocked is safer than throwing out of an event callback: the
+    // write itself stays atomic via a unique temp file plus rename.
+    this.degradedReason = "Run store lock was busy; the last write was not serialized.";
+    return undefined;
+  }
+
+  private reclaimStaleLock(lockPath: string): boolean {
+    try {
+      const owner = Number(readFileSync(lockPath, "utf8").trim());
+      const age = Date.now() - statSync(lockPath).mtimeMs;
+      const ownerDead = !Number.isInteger(owner) || owner <= 0 || !isProcessAlive(owner);
+      if (owner === process.pid || ownerDead || age > STALE_LOCK_MS) {
+        unlinkSync(lockPath);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  private releaseLock(descriptor: number | undefined): void {
+    if (descriptor === undefined) return;
+    try {
+      closeSync(descriptor);
+    } catch {
+      // Already closed.
+    }
+    try {
+      unlinkSync(`${this.filePath}.lock`);
+    } catch {
+      // Another process already reclaimed it.
+    }
   }
 
   private reconcileInterruptedRuns(): void {
@@ -174,6 +258,11 @@ export class RunStore {
       markDeadOwnersInterrupted(this.data.runs);
     });
   }
+}
+
+function sleep(milliseconds: number): void {
+  // The store API is synchronous and is called from JSON-RPC callbacks.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function validRunRecord(value: unknown): value is RunRecord {
@@ -220,7 +309,7 @@ function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<Run
     case "file_change":
       return { type: "file_change", path: event.path.slice(0, 4_096), kind: event.kind };
     case "error":
-      return { type: "error", message: "Provider reported an error." };
+      return { type: "error", message: storedDiagnostic(event.message) };
     case "completed":
       return { type: "completed", summary: "Provider completed.", exitCode: event.exitCode };
   }
@@ -230,17 +319,34 @@ function persistedEvent(event: Exclude<RunEvent, { type: "text" }>): Exclude<Run
  * Only the controller's own ACP stage diagnostics are persisted; they are
  * already sanitized, and this is a second, independent redaction pass.
  */
-function storedDiagnostic(value: string): string {
+export function storedDiagnostic(value: string): string {
   if (!value.startsWith("ACP ")) return "Provider reported an error.";
-  return value
-    .replace(/\b[A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*\s*[:=]\s*\S+/gi, "[REDACTED CREDENTIAL]")
-    .replace(/\b(authorization|bearer)\b\s*[:= ]\s*\S+/gi, "$1 [REDACTED]")
-    .slice(0, 600);
+  return redactSecrets(value).slice(0, 600);
 }
 
 /** Agent-authored text is replaced; adapter-authored notes are preserved. */
 function safeLabel(label: string): string {
-  return label.startsWith("ACP ") ? label.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : "Agent reported progress";
+  return label.startsWith("ACP ") ? redactSecrets(label).slice(0, 200) : "Agent reported progress";
+}
+
+/**
+ * Structured, fail-closed secret removal. The final high-entropy sweep catches
+ * credential shapes that the named patterns do not anticipate.
+ */
+export function redactSecrets(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\b(authorization|proxy-authorization|www-authenticate)\b\s*[:=]\s*[^\n;]+/gi, "$1=[REDACTED]")
+    .replace(/\b(basic|bearer|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "$1 [REDACTED]")
+    .replace(/\bset-cookie\b\s*[:=]\s*[^\n]+/gi, "set-cookie=[REDACTED]")
+    .replace(/\bcookie\b\s*[:=]\s*[^\n;]+/gi, "cookie=[REDACTED]")
+    .replace(/"?\b(?:access_token|refresh_token|id_token|session_token|auth_token|api[_-]?key|apikey|client_secret|secret|password|passwd|credential)\b"?\s*[:=]\s*"?[^"\s,;}]+"?/gi, "[REDACTED CREDENTIAL]")
+    .replace(/\b[A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*\s*[:=]\s*\S+/gi, "[REDACTED CREDENTIAL]")
+    .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, "[REDACTED JWT]")
+    .replace(/\b(?:sk|pk|rk|ghp|gho|ghu|ghs|xai|xoxb|xoxp)[-_][A-Za-z0-9_-]{8,}/gi, "[REDACTED KEY]")
+    .replace(/\b[A-Za-z0-9+/_-]{40,}={0,2}\b/g, "[REDACTED SECRET]")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -248,8 +354,8 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 

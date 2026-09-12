@@ -62,9 +62,20 @@ streamed text to disk; streamed text stays in memory while the server runs.
 - `session/cancel` is sent as a notification, per ACP, then the provider's
   process group is terminated.
 - Changed files come from `tool_call` diff content, plus `locations` only for
-  writing tool kinds (`edit`, `delete`, `move`).
+  writing tool kinds (`edit`, `delete`, `move`). A change announced outside the
+  workspace is never silently dropped: it is flagged, surfaced on the run, and
+  prevents the turn from being reported as a clean success.
+- After a mode is confirmed, a `current_mode_update` (or mode config-option
+  update) that leaves the acceptable set aborts a `review`/`plan` run instead of
+  letting it continue with write access.
+- `initialize` responses are checked for a supported ACP protocol version.
+- Pending requests carry their real content: the tool-call title, kind, and
+  locations for permissions; the questions and option IDs for a Cursor
+  question; the plan name, overview, and steps for a plan approval.
 - Only `stopReason: "end_turn"` is success. `refusal`, `max_tokens`, and
   `max_turn_requests` are reported as failures with the reason retained.
+- Provider children are terminated on cancel, on transport close, and on
+  SIGINT/SIGTERM/SIGHUP, with a kill escalation so nothing is orphaned.
 
 ### Safety
 
@@ -81,7 +92,14 @@ streamed text to disk; streamed text stays in memory while the server runs.
   hatch and `"minimal"` is the strictest option. Values are never logged.
 - Failures expose a bounded, sanitized diagnostic with the ACP stage, JSON-RPC
   or process code, advertised auth-method IDs/types, and a stderr tail. Prompt
-  text, token-like values, and paths outside the workspace are redacted.
+  text, credential-shaped values, and paths outside the workspace are redacted.
+  Redaction covers `Authorization` (including Basic), cookies, JSON credential
+  fields such as `access_token`, JWTs, prefixed keys such as `sk-`, and a
+  final high-entropy sweep. Anything written to the run store is redacted again
+  independently of the caller.
+- The run store is best-effort. Lock contention backs off and then degrades,
+  stale and corrupt state is reclaimed, and a persistence failure marks the run
+  `storeDegraded` rather than taking down the MCP server.
 
 Model selection stays provider-specific. Grok Build's documented ACP startup
 flag supports `--model`; Cursor's documented ACP entry point defines no model
