@@ -8,6 +8,7 @@ import {
   AcpRpcError,
   AcpTimeoutError,
   AUTH_REQUIRED_CODE,
+  INVALID_PARAMS_CODE,
   JsonRpcPeer,
   normalizeAcpEvent,
   readModeDrift,
@@ -28,7 +29,7 @@ import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
 
-const CLIENT_VERSION = "0.2.1";
+const CLIENT_VERSION = "0.2.2";
 const SHORT_TIMEOUT_MS = 30_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const SHUTDOWN_GRACE_MS = 750;
@@ -412,17 +413,24 @@ export class RunController {
     } catch (error) {
       if (!isAuthRequired(error)) throw error;
       if (!isProtocolAuthMethod(authMethod)) {
-        throw new Error(
-          authMethod
-            ? `The provider requires authentication but only advertises the terminal method "${authMethod.methodId}", which ACP forbids sending to authenticate. Run \`cursor-agent login\` in a terminal, then retry.`
-            : "The provider requires authentication but advertised no protocol-driven auth method. Run `cursor-agent login` in a terminal, then retry.",
-        );
+        throw new Error(unusableAuthMethodMessage(runtime, authMethod));
       }
       this.acceptEvent(id, {
         type: "activity",
         label: "ACP session creation reported auth_required; authenticating with the advertised method.",
       });
-      await this.authenticate(id, runtime, authMethod as AuthMethod);
+      try {
+        await this.authenticate(id, runtime, authMethod as AuthMethod);
+      } catch (authError) {
+        if (isInvalidParams(authError)) {
+          this.acceptEvent(id, {
+            type: "activity",
+            label: "Protocol authenticate was rejected as invalid or unnecessary for this Cursor build when a CLI session exists; retrying the session without authenticate.",
+          });
+          return this.createSession(runtime, request, initialized);
+        }
+        throw authError;
+      }
       return this.createSession(runtime, request, initialized);
     }
   }
@@ -698,7 +706,9 @@ export class RunController {
       runtime.prompt,
       runtime.authMethodsSummary,
       runtime.stderrTail,
-      runtime.provider.name === "cursor" && runtime.preauthenticatedSessionAttempted,
+      runtime.preauthenticatedSessionAttempted && (
+        runtime.provider.name === "cursor" || runtime.provider.cliSessionKnownGood()
+      ),
     );
   }
 
@@ -801,6 +811,21 @@ function isAuthRequired(error: unknown): boolean {
     || /auth[_ -]?required|unauthenticated|not logged in/i.test(error.providerMessage ?? "");
 }
 
+function isInvalidParams(error: unknown): boolean {
+  return error instanceof AcpRpcError && error.code === INVALID_PARAMS_CODE;
+}
+
+function unusableAuthMethodMessage(runtime: RuntimeRun, authMethod: AuthMethod | undefined): string {
+  const method = authMethod
+    ? `only advertises the terminal method "${authMethod.methodId}", which ACP forbids sending to authenticate`
+    : "advertised no protocol-driven auth method";
+  const cliKnownGood = runtime.provider.cliSessionKnownGood();
+  if (runtime.preauthenticatedSessionAttempted && (cliKnownGood || runtime.provider.name === "cursor")) {
+    return `ACP session creation reported auth_required, but the provider ${method}. Protocol authenticate is invalid or unnecessary when the Cursor CLI session already exists; the ACP child could not reuse that session. Start Codex from the same user login/keychain environment where cursor-agent status works.`;
+  }
+  return `ACP session creation reported auth_required, but the provider ${method}. The ACP child could not reuse an existing CLI session. Start Codex from the same user login/keychain environment where the provider CLI status works.`;
+}
+
 function supportsLoadSession(initialized: Record<string, unknown>): boolean {
   const capabilities = initialized.agentCapabilities;
   if (!capabilities || typeof capabilities !== "object") return false;
@@ -874,14 +899,25 @@ export function describeFailure(
     const raw = error instanceof Error ? error.message : "Unexpected internal adapter error.";
     message = `ACP ${stage} failed: ${sanitizeDiagnosticText(raw, workspace, prompt)}`;
   }
-  if (preauthenticatedCursorSession && (stage === "session/new" || stage === "session/load")) {
-    message = `ACP ${stage} failed after the pre-authenticated Cursor path: the ACP child could not reuse the logged-in Cursor CLI session. Start Codex from the same user login/keychain environment where cursor-agent status works. ${message}`;
+  if (preauthenticatedCursorSession) {
+    message = stripLoginGuidance(message);
+    if (stage === "session/new" || stage === "session/load" || stage === "authenticate") {
+      message = `ACP ${stage} failed after the pre-authenticated Cursor path: the ACP child could not reuse the logged-in Cursor CLI session. Start Codex from the same user login/keychain environment where cursor-agent status works. ${message}`;
+    }
   }
   if (stderrTail) message = `${message.slice(0, 320)} Provider stderr: ${stderrTail.slice(-140)}`;
   const withSummary = (stage === "authenticate" || preauthenticatedCursorSession) && authMethodsSummary
     ? `${message} Advertised auth methods: ${authMethodsSummary}.`
     : message;
   return withSummary.slice(0, 600);
+}
+
+function stripLoginGuidance(value: string): string {
+  return value
+    .replace(/please login first[^.]*\.?/gi, "")
+    .replace(/run [`']?cursor-agent login[`']?[^.]*\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function sanitizeDiagnosticText(value: string, workspace?: string, prompt?: string): string {

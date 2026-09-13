@@ -111,6 +111,14 @@ export class CursorProvider extends AcpProvider {
     return true;
   }
 
+  cliSessionKnownGood(): boolean {
+    const result = this.probe.run(EXECUTABLE, ["status"]);
+    if (!succeeded(result)) return false;
+    const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    if (/not logged in|logged out|unauthenticated/i.test(text)) return false;
+    return /logged in|authenticated/i.test(text) || result.status === 0;
+  }
+
   protected environment(options: StartOptions): NodeJS.ProcessEnv {
     // Cursor login state lives in the user's CLI config and OS keychain, so the
     // child needs the session context Codex itself was started with.

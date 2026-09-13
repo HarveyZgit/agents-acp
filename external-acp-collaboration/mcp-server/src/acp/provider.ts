@@ -9,6 +9,8 @@ export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refu
 
 /** ACP reserves -32000 for `auth_required`. */
 export const AUTH_REQUIRED_CODE = -32000;
+/** JSON-RPC Invalid params. Cursor returns this for `authenticate(cursor_login)` when a CLI session already exists. */
+export const INVALID_PARAMS_CODE = -32602;
 
 export type AuthMethod = {
   methodId: string;
@@ -306,6 +308,15 @@ export abstract class AcpProvider {
 
   /** Cursor-style agents are commonly pre-authenticated by their own CLI login. */
   prefersSessionBeforeAuthentication(): boolean {
+    return false;
+  }
+
+  /**
+   * True when the provider's own CLI already has a usable session (for
+   * example `cursor-agent status` reports logged in). Used only to avoid
+   * telling an already-authenticated operator to log in.
+   */
+  cliSessionKnownGood(): boolean {
     return false;
   }
 

@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AcpProvider,
+  AcpRpcError,
   baseEnvironment,
+  INVALID_PARAMS_CODE,
   JsonRpcPeer,
   normalizeAcpEvent,
   providerEnvironment,
@@ -18,7 +20,7 @@ import {
   type ProviderName,
   type StartOptions,
 } from "../src/acp/provider.ts";
-import { RunController } from "../src/run-controller.ts";
+import { describeFailure, RunController } from "../src/run-controller.ts";
 import { WorkspacePolicy } from "../src/policy.ts";
 import { RunStore } from "../src/run-store.ts";
 import { CursorProvider, type CursorProbe, type CursorProbeResult } from "../src/acp/cursor.ts";
@@ -292,10 +294,14 @@ type MockOptions = {
   driftToMode?: string;
   outsideWorkspaceWrite?: boolean;
   protocolVersion?: unknown;
+  name?: ProviderName;
+  cliSessionKnownGood?: boolean;
+  authenticateInvalidParams?: boolean;
+  allowSessionAfterInvalidParams?: boolean;
 };
 
 class MockProvider extends AcpProvider {
-  readonly name: ProviderName = "grok";
+  readonly name: ProviderName;
   readonly executable = "mock-grok";
   readonly capabilities: ProviderCapabilities = {
     supportsModelSelection: true,
@@ -305,11 +311,13 @@ class MockProvider extends AcpProvider {
   readonly transport = new FakeTransport();
   private readonly options: MockOptions;
   private authenticated: boolean;
+  private cliSessionExists = false;
   private promptId: number | string | undefined;
 
   constructor(options: MockOptions = {}) {
     super();
     this.options = options;
+    this.name = options.name ?? "grok";
     this.authenticated = options.requireAuth !== true;
   }
 
@@ -330,6 +338,10 @@ class MockProvider extends AcpProvider {
 
   prefersSessionBeforeAuthentication(): boolean {
     return true;
+  }
+
+  cliSessionKnownGood(): boolean {
+    return this.options.cliSessionKnownGood === true;
   }
 
   createTransport(): LineTransport {
@@ -362,11 +374,20 @@ class MockProvider extends AcpProvider {
         });
         return;
       case "authenticate":
+        if (this.options.authenticateInvalidParams) {
+          if (this.options.allowSessionAfterInvalidParams !== false) this.cliSessionExists = true;
+          this.transport.emit({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: INVALID_PARAMS_CODE, message: "Invalid params" },
+          });
+          return;
+        }
         this.authenticated = true;
         this.transport.emit({ jsonrpc: "2.0", id: message.id, result: {} });
         return;
       case "session/new":
-        if (!this.authenticated) {
+        if (!this.authenticated && !this.cliSessionExists) {
           this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "auth_required" } });
           return;
         }
@@ -506,15 +527,85 @@ test("auth_required triggers authenticate with a protocol method and retries ses
 });
 
 test("terminal-only auth methods are never sent to authenticate", async () => {
-  const provider = new MockProvider({ requireAuth: true, authMethods: [{ methodId: "cursor_login", type: "terminal" }] });
+  const provider = new MockProvider({
+    name: "cursor",
+    requireAuth: true,
+    cliSessionKnownGood: true,
+    authMethods: [{ methodId: "cursor_login", type: "terminal" }],
+  });
   const { workspace, controller } = controllerFor(provider);
-  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  const run = controller.start({ provider: "cursor", cwd: workspace, prompt: "task", mode: "plan" });
   await settle();
   const status = controller.status(run.id);
   assert.equal(status.status, "failed");
   assert.match(String(status.error), /terminal method/);
-  assert.match(String(status.error), /cursor-agent login/);
+  assert.match(String(status.error), /could not reuse/);
+  assert.equal(/please login first|cursor-agent login/i.test(String(status.error)), false);
   assert.equal(provider.transport.sent("authenticate").length, 0);
+});
+
+test("authenticate -32602 is treated as unnecessary and retries session without login guidance", async () => {
+  const provider = new MockProvider({
+    name: "cursor",
+    requireAuth: true,
+    cliSessionKnownGood: true,
+    authenticateInvalidParams: true,
+    authMethods: [{ methodId: "cursor_login", type: "agent" }],
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "cursor", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const status = controller.status(run.id);
+  assert.equal(status.status, "waiting_permission");
+  assert.equal(provider.transport.sent("authenticate").length, 1);
+  assert.equal(provider.transport.sent("session/new").length, 2);
+  const events = JSON.stringify(status.liveEvents ?? []);
+  assert.match(events, /invalid or unnecessary/);
+  assert.equal(/please login first|cursor-agent login/i.test(`${status.error ?? ""} ${events}`), false);
+  await controller.cancel(run.id);
+});
+
+test("authenticate -32602 then a failed session retry never tells a logged-in Cursor user to login", async () => {
+  const provider = new MockProvider({
+    name: "cursor",
+    requireAuth: true,
+    cliSessionKnownGood: true,
+    authenticateInvalidParams: true,
+    allowSessionAfterInvalidParams: false,
+    authMethods: [{ methodId: "cursor_login", type: "agent" }],
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "cursor", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const status = controller.status(run.id);
+  assert.equal(status.status, "failed");
+  assert.equal(provider.transport.sent("authenticate").length, 1);
+  assert.equal(provider.transport.sent("session/new").length, 2);
+  assert.match(String(status.error), /could not reuse the logged-in Cursor CLI session/);
+  assert.equal(/please login first|cursor-agent login/i.test(String(status.error)), false);
+});
+
+test("Cursor CLI status is known good only when cursor-agent status reports a login", () => {
+  const loggedIn = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent status": { status: 0, stdout: "Logged in as user@example.com\n" },
+  }));
+  assert.equal(loggedIn.cliSessionKnownGood(), true);
+
+  const loggedOut = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent status": { status: 0, stdout: "Not logged in\n" },
+  }));
+  assert.equal(loggedOut.cliSessionKnownGood(), false);
+
+  const missing = new CursorProvider(new FixtureCursorProbe({}));
+  assert.equal(missing.cliSessionKnownGood(), false);
+});
+
+test("preauthenticated Cursor failures strip please-login guidance from diagnostics", () => {
+  const error = new AcpRpcError(INVALID_PARAMS_CODE, "Invalid params; please login first and run cursor-agent login");
+  const message = describeFailure("authenticate", error, "/workspace", undefined, "cursor_login:agent", undefined, true);
+  assert.match(message, /could not reuse the logged-in Cursor CLI session/);
+  assert.match(message, /JSON-RPC code -32602/);
+  assert.equal(/please login first|cursor-agent login/i.test(message), false);
 });
 
 test("read-only modes fail closed when no read-only ACP mode is available", async () => {
@@ -758,6 +849,7 @@ test("authenticate failures include only safe advertised auth method summaries",
   assert.match(error, /ACP authenticate was rejected/);
   assert.match(error, /Advertised auth methods: cursor_login:agent/);
   assert.equal(error.includes("hidden-value"), false);
+  assert.equal(/please login first|cursor-agent login/i.test(error), false);
 });
 
 test("controller terminates an ACP run that exceeds its configured lifetime", async () => {

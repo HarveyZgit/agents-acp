@@ -1,4 +1,4 @@
-# Installing agents-acp 0.2.1 into Codex
+# Installing agents-acp 0.2.2 into Codex
 
 ## Preconditions
 
@@ -127,9 +127,13 @@ offered `options`. Choose one yourself and call `respond_permission` with that
 `cursor-agent` login state lives in its CLI config and the OS keychain. Start
 Codex from the same user session where `cursor-agent status` reports a login.
 If a session still cannot be created, the failure text names the ACP stage, the
-JSON-RPC code, the advertised auth methods, and a sanitized stderr tail. When
-only a `terminal` auth method is advertised, run `cursor-agent login` in a
-terminal; ACP forbids sending terminal methods to `authenticate`.
+JSON-RPC code, the advertised auth methods, and a sanitized stderr tail. A
+`-32602` from `authenticate(cursor_login)` is treated as "protocol authenticate
+is invalid or unnecessary" and the plugin retries the session without
+authenticate. When `cursor-agent status` already shows a login, the plugin
+never tells you to log in again. A `terminal` auth method is never sent to
+`authenticate`; the failure then explains that the ACP child could not reuse
+the existing CLI session.
 
 ## 4. Optional write mode
 
@@ -155,19 +159,19 @@ codex plugin marketplace remove agents-acp
 codex plugin marketplace add "$PWD"
 ```
 
-Restart Codex, then confirm the reported plugin version is 0.2.1.
+Restart Codex, then confirm the reported plugin version is 0.2.2.
 
 ## Archive
 
-`dist/agents-acp-0.2.1.zip` and `dist/agents-acp-0.2.1.tar.gz` contain the
+`dist/agents-acp-0.2.2.zip` and `dist/agents-acp-0.2.2.tar.gz` contain the
 plugin directory. Extract one, then point a marketplace entry's `source.path`
 at `./external-acp-collaboration` relative to that marketplace root.
 
 Rebuild them from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.2.1.tar.gz dist/agents-acp-0.2.1.zip
-tar -C . -czf dist/agents-acp-0.2.1.tar.gz external-acp-collaboration
-zip -qr dist/agents-acp-0.2.1.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.2.1.{tar.gz,zip}
+rm -f dist/agents-acp-0.2.2.tar.gz dist/agents-acp-0.2.2.zip
+tar -C . -czf dist/agents-acp-0.2.2.tar.gz external-acp-collaboration
+zip -qr dist/agents-acp-0.2.2.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.2.2.{tar.gz,zip}
 ```

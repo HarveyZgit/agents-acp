@@ -44,8 +44,12 @@ streamed text to disk; streamed text stays in memory while the server runs.
   first for pre-authenticated CLIs. Only an `auth_required` (`-32000`) response
   triggers `authenticate`, and only with an advertised non-terminal method.
   Auth descriptors are read from either `methodId` or `id`. A terminal-only
-  method is never sent to `authenticate`; the run reports that the user must
-  run `cursor-agent login`.
+  method is never sent to `authenticate`. If `authenticate(cursor_login)`
+  returns `-32602` (Invalid params), the plugin treats protocol authenticate as
+  invalid or unnecessary for that Cursor build when a CLI session exists, then
+  retries `session/new` without authenticate. When the pre-authenticated path
+  was used and `cursor-agent status` is already good, failures never tell the
+  operator to log in or to run `cursor-agent login`.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
   `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,

@@ -15,3 +15,5 @@ Use this skill when the user explicitly asks for an independent external-agent p
 8. On completion, call `result`. Treat only `stopReason: "end_turn"` as success; report refusal or truncation as an incomplete run. Review changed files and run relevant project checks before recommending adoption.
 
 If the provider exposes no documented ACP model selector, return the tool's model-selection error rather than embedding a model name in the prompt.
+
+If a Cursor run fails during authenticate or session creation, do not tell the user to run `cursor-agent login` when they are already logged in. `-32602` from `authenticate(cursor_login)` means protocol authenticate is invalid or unnecessary; the plugin retries the session using the existing CLI session.
