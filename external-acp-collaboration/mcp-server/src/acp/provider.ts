@@ -306,6 +306,10 @@ export abstract class AcpProvider {
   abstract command(options: StartOptions): string[];
   abstract authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined;
 
+  authenticateParams(method: AuthMethod): Record<string, unknown> {
+    return { methodId: method.methodId };
+  }
+
   /** Cursor-style agents are commonly pre-authenticated by their own CLI login. */
   prefersSessionBeforeAuthentication(): boolean {
     return false;

@@ -2,7 +2,8 @@
 
 `agents-acp` is a Codex plugin that delegates a scoped task to a locally
 installed ACP-capable coding agent. The adapters target Grok Build
-(`grok agent stdio`) and Cursor CLI (`cursor-agent acp`).
+(`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`) and
+Cursor CLI (`cursor-agent acp`).
 
 Cursor uses only the official `cursor-agent` binary. It never invokes `cursor`
 (the desktop launcher on many machines) and never invokes a bare `agent`,
@@ -47,9 +48,13 @@ streamed text to disk; streamed text stays in memory while the server runs.
   method is never sent to `authenticate`. If `authenticate(cursor_login)`
   returns `-32602` (Invalid params), the plugin treats protocol authenticate as
   invalid or unnecessary for that Cursor build when a CLI session exists, then
-  retries `session/new` without authenticate. When the pre-authenticated path
-  was used and `cursor-agent status` is already good, failures never tell the
-  operator to log in or to run `cursor-agent login`.
+  retries `session/new` without authenticate. The same `-32602` retry applies
+  when a provider authenticates first. Grok authenticate includes
+  `_meta.headless: true` as in the official x.ai ACP scripting example.
+  When the pre-authenticated path was used and `cursor-agent status` is
+  already good, failures never tell the operator to log in or to run
+  `cursor-agent login`. A bare `Permission denied` from `session/new` is
+  expanded to name workspace and provider-session file access.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
   `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,

@@ -135,6 +135,17 @@ never tells you to log in again. A `terminal` auth method is never sent to
 `authenticate`; the failure then explains that the ACP child could not reuse
 the existing CLI session.
 
+### If Grok reports Permission denied on session/new
+
+Official Grok ACP is `grok agent stdio`, with `--no-auto-update` for scripts
+and `--no-leader` so a Codex-spawned child does not need `~/.grok/leader.sock`.
+The plugin also passes `--cwd` and authenticates with `_meta.headless: true`
+when Grok requires `cached_token` or `xai.api_key`. Start Codex from the same
+user login where interactive `grok` works, keep the workspace readable, and
+keep `~/.grok` writable. A `Permission denied` at `session/new` is expanded to
+name those workspace and session-file checks; it is not treated as a missing
+login when a CLI session already exists. Never pass `--always-approve`.
+
 ## 4. Optional write mode
 
 A provider process is not an OS sandbox: setting `cwd` does not stop a CLI from

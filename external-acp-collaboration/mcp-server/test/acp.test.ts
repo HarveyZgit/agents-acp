@@ -188,8 +188,13 @@ test("model arguments are passed only through documented provider capabilities",
   );
   assert.deepEqual(
     new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "grok-build" }),
-    ["--no-auto-update", "agent", "--model", "grok-build", "stdio"],
+    ["--no-auto-update", "--cwd", "/project", "agent", "--no-leader", "--model", "grok-build", "stdio"],
   );
+  assert.deepEqual(
+    new GrokProvider().authenticateParams({ methodId: "cached_token" }),
+    { methodId: "cached_token", _meta: { headless: true } },
+  );
+  assert.equal(new GrokProvider().prefersSessionBeforeAuthentication(), true);
   assert.throws(
     () => new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "--always-approve" }),
     /cannot be interpreted as a CLI flag/,
@@ -298,6 +303,8 @@ type MockOptions = {
   cliSessionKnownGood?: boolean;
   authenticateInvalidParams?: boolean;
   allowSessionAfterInvalidParams?: boolean;
+  prefersSessionBeforeAuthentication?: boolean;
+  authenticateHeadless?: boolean;
 };
 
 class MockProvider extends AcpProvider {
@@ -337,7 +344,13 @@ class MockProvider extends AcpProvider {
   }
 
   prefersSessionBeforeAuthentication(): boolean {
-    return true;
+    return this.options.prefersSessionBeforeAuthentication !== false;
+  }
+
+  authenticateParams(method: AuthMethod): Record<string, unknown> {
+    return this.options.authenticateHeadless
+      ? { methodId: method.methodId, _meta: { headless: true } }
+      : { methodId: method.methodId };
   }
 
   cliSessionKnownGood(): boolean {
@@ -598,6 +611,39 @@ test("Cursor CLI status is known good only when cursor-agent status reports a lo
 
   const missing = new CursorProvider(new FixtureCursorProbe({}));
   assert.equal(missing.cliSessionKnownGood(), false);
+});
+
+test("authenticate-first providers also retry session after -32602", async () => {
+  const provider = new MockProvider({
+    requireAuth: true,
+    prefersSessionBeforeAuthentication: false,
+    authenticateInvalidParams: true,
+    authenticateHeadless: true,
+    authMethods: [{ methodId: "cached_token", type: "agent" }],
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  assert.equal(controller.status(run.id).status, "waiting_permission");
+  const authenticate = provider.transport.sent("authenticate")[0];
+  assert.deepEqual(authenticate.params, { methodId: "cached_token", _meta: { headless: true } });
+  assert.equal(provider.transport.sent("session/new").length, 1);
+  await controller.cancel(run.id);
+});
+
+test("session/new Permission denied names cwd and session-file access, not a bare EACCES", async () => {
+  const provider = new MockProvider({
+    name: "grok",
+    rejectedMethod: "session/new",
+    rejectionMessage: "Permission denied",
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "grok", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const error = String(controller.result(run.id).error);
+  assert.match(error, /Permission denied/);
+  assert.match(error, /could not access the workspace or provider session files/);
+  assert.equal(/please login first|cursor-agent login/i.test(error), false);
 });
 
 test("preauthenticated Cursor failures strip please-login guidance from diagnostics", () => {

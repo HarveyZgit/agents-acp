@@ -403,8 +403,7 @@ export class RunController {
   ): Promise<Record<string, unknown>> {
     const authMethod = runtime.provider.authenticationMethod(initialized);
     if (!runtime.provider.prefersSessionBeforeAuthentication() && isProtocolAuthMethod(authMethod)) {
-      await this.authenticate(id, runtime, authMethod as AuthMethod);
-      return this.createSession(runtime, request, initialized);
+      return this.authenticateOrReuseSession(id, runtime, request, initialized, authMethod as AuthMethod);
     }
 
     runtime.preauthenticatedSessionAttempted = true;
@@ -419,25 +418,35 @@ export class RunController {
         type: "activity",
         label: "ACP session creation reported auth_required; authenticating with the advertised method.",
       });
-      try {
-        await this.authenticate(id, runtime, authMethod as AuthMethod);
-      } catch (authError) {
-        if (isInvalidParams(authError)) {
-          this.acceptEvent(id, {
-            type: "activity",
-            label: "Protocol authenticate was rejected as invalid or unnecessary for this Cursor build when a CLI session exists; retrying the session without authenticate.",
-          });
-          return this.createSession(runtime, request, initialized);
-        }
-        throw authError;
-      }
-      return this.createSession(runtime, request, initialized);
+      return this.authenticateOrReuseSession(id, runtime, request, initialized, authMethod as AuthMethod);
     }
+  }
+
+  private async authenticateOrReuseSession(
+    id: string,
+    runtime: RuntimeRun,
+    request: StartRequest,
+    initialized: Record<string, unknown>,
+    method: AuthMethod,
+  ): Promise<Record<string, unknown>> {
+    try {
+      await this.authenticate(id, runtime, method);
+    } catch (authError) {
+      if (isInvalidParams(authError)) {
+        this.acceptEvent(id, {
+          type: "activity",
+          label: "Protocol authenticate was rejected as invalid or unnecessary for this CLI session; retrying the session without authenticate.",
+        });
+        return this.createSession(runtime, request, initialized);
+      }
+      throw authError;
+    }
+    return this.createSession(runtime, request, initialized);
   }
 
   private async authenticate(id: string, runtime: RuntimeRun, method: AuthMethod): Promise<void> {
     runtime.stage = "authenticate";
-    await runtime.peer.request("authenticate", { methodId: method.methodId }, SHORT_TIMEOUT_MS);
+    await runtime.peer.request("authenticate", runtime.provider.authenticateParams(method), SHORT_TIMEOUT_MS);
     if (!this.isActive(id)) throw new Error("Run became inactive during authentication.");
   }
 
@@ -706,9 +715,7 @@ export class RunController {
       runtime.prompt,
       runtime.authMethodsSummary,
       runtime.stderrTail,
-      runtime.preauthenticatedSessionAttempted && (
-        runtime.provider.name === "cursor" || runtime.provider.cliSessionKnownGood()
-      ),
+      runtime.provider.name === "cursor" && runtime.preauthenticatedSessionAttempted,
     );
   }
 
@@ -821,7 +828,8 @@ function unusableAuthMethodMessage(runtime: RuntimeRun, authMethod: AuthMethod |
     : "advertised no protocol-driven auth method";
   const cliKnownGood = runtime.provider.cliSessionKnownGood();
   if (runtime.preauthenticatedSessionAttempted && (cliKnownGood || runtime.provider.name === "cursor")) {
-    return `ACP session creation reported auth_required, but the provider ${method}. Protocol authenticate is invalid or unnecessary when the Cursor CLI session already exists; the ACP child could not reuse that session. Start Codex from the same user login/keychain environment where cursor-agent status works.`;
+    const cli = runtime.provider.name === "cursor" ? "cursor-agent status" : "the provider CLI";
+    return `ACP session creation reported auth_required, but the provider ${method}. Protocol authenticate is invalid or unnecessary when the CLI session already exists; the ACP child could not reuse that session. Start Codex from the same user login/keychain environment where ${cli} works.`;
   }
   return `ACP session creation reported auth_required, but the provider ${method}. The ACP child could not reuse an existing CLI session. Start Codex from the same user login/keychain environment where the provider CLI status works.`;
 }
@@ -904,6 +912,9 @@ export function describeFailure(
     if (stage === "session/new" || stage === "session/load" || stage === "authenticate") {
       message = `ACP ${stage} failed after the pre-authenticated Cursor path: the ACP child could not reuse the logged-in Cursor CLI session. Start Codex from the same user login/keychain environment where cursor-agent status works. ${message}`;
     }
+  }
+  if (/permission denied/i.test(message)) {
+    message = `${message} The ACP child could not access the workspace or provider session files. Confirm cwd is readable, ~/.grok (or the Cursor CLI config) is writable in the same user login that Codex was started from, and the provider is launched as a local agent rather than a shared leader.`;
   }
   if (stderrTail) message = `${message.slice(0, 320)} Provider stderr: ${stderrTail.slice(-140)}`;
   const withSummary = (stage === "authenticate" || preauthenticatedCursorSession) && authMethodsSummary
