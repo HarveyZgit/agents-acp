@@ -5,7 +5,7 @@ import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
 import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
-const SERVER_VERSION = "0.2.2";
+const SERVER_VERSION = "0.2.3";
 
 const config = loadConfig();
 const store = new RunStore(config.storePath);
@@ -71,7 +71,10 @@ const tools = [
       prompt: { type: "string", description: "Sent only to the provider process and never persisted." },
       mode: { type: "string", enum: ["review", "plan", "implement"] },
       allowImplement: { type: "boolean" },
-      model: { type: "string" },
+      model: {
+        type: "string",
+        description: "Optional. Omit to use the provider CLI default. Prefer grok without a model unless the user asks. For Cursor, pass a model only to pin a billing pool (for example composer-2.5).",
+      },
     },
   }),
   tool("status", "Return status, lifecycle stage, elapsed time, pending decisions with their offered option IDs, and recent events.", schema(["runId"])),

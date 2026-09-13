@@ -3,6 +3,7 @@ import {
   AcpProvider,
   baseEnvironment,
   providerEnvironment,
+  safeModelId,
   type AuthMethod,
   type ProviderCapabilities,
   type ProviderName,
@@ -56,8 +57,8 @@ class ProcessCursorProbe implements CursorProbe {
 export class CursorProvider extends AcpProvider {
   readonly name: ProviderName = "cursor";
   readonly capabilities: ProviderCapabilities = {
-    supportsModelSelection: false,
-    modelSelection: "none",
+    supportsModelSelection: true,
+    modelSelection: "startup",
     supportedModes: ["ask", "plan", "agent"],
   };
   private readonly probe: CursorProbe;
@@ -89,17 +90,17 @@ export class CursorProvider extends AcpProvider {
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}.`,
+      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Optional start.model pins a CLI model (for example composer-2.5) onto a Cursor billing pool; omit it to use the CLI selectedModel default.`,
     };
   }
 
   command(options: StartOptions): string[] {
-    if (options.model) {
-      throw new Error("Model selection unavailable for this Cursor ACP version; the documented ACP entry point does not define a model launch or session parameter.");
-    }
     const resolved = this.resolve();
     if (!resolved) throw new Error("cursor-agent ACP is unavailable on PATH. This provider intentionally does not fall back to cursor or agent.");
-    return [...resolved.args];
+    const model = safeModelId(options.model, "Cursor");
+    // Official ACP docs omit a universal model field; the CLI still accepts
+    // `cursor-agent --model <id> acp` so quota can be pinned to a billing pool.
+    return model ? ["--model", model, ...resolved.args] : [...resolved.args];
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {

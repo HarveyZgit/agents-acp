@@ -1,7 +1,9 @@
 import {
   AcpProvider,
   providerEnvironment,
+  safeModelId,
   type AuthMethod,
+  type ProviderAvailability,
   type ProviderCapabilities,
   type ProviderName,
   type StartOptions,
@@ -17,11 +19,18 @@ export class GrokProvider extends AcpProvider {
     supportedModes: ["ask", "plan", "agent"],
   };
 
+  discover(): ProviderAvailability {
+    const discovered = super.discover();
+    if (!discovered.available) return discovered;
+    return {
+      ...discovered,
+      note: "Model is optional; omit start.model to use the Grok CLI default.",
+    };
+  }
+
   command(options: StartOptions): string[] {
-    if (options.model && (!/^[A-Za-z0-9._:/-]{1,128}$/.test(options.model) || options.model.startsWith("-"))) {
-      throw new Error("Grok model must be a documented model identifier and cannot be interpreted as a CLI flag.");
-    }
-    const modelArgs = options.model ? ["--model", options.model] : [];
+    const model = safeModelId(options.model, "Grok");
+    const modelArgs = model ? ["--model", model] : [];
     // Official ACP launch is `grok agent stdio`. `--no-auto-update` is the
     // documented scripting flag (global). `--no-leader` forces a local agent so
     // a Codex-spawned child does not need `~/.grok/leader.sock`. Never pass

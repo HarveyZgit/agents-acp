@@ -425,6 +425,19 @@ function pickEnvironment(names: string[]): NodeJS.ProcessEnv {
   return environment;
 }
 
+/**
+ * Optional startup `--model` values are passed as a single argv element.
+ * Reject flag-shaped or empty identifiers so a model cannot become another switch.
+ */
+export function safeModelId(model: string | undefined, label: string): string | undefined {
+  if (model === undefined) return undefined;
+  const value = model.trim();
+  if (!value || value.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(value)) {
+    throw new Error(`${label} model must be a documented model identifier and cannot be interpreted as a CLI flag.`);
+  }
+  return value;
+}
+
 /** Reads `SessionModeState` from a `session/new` or `session/load` response. */
 export function readSessionModes(session: Record<string, unknown>): {
   availableModes: string[];

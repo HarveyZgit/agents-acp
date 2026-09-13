@@ -110,9 +110,12 @@ streamed text to disk; streamed text stays in memory while the server runs.
   stale and corrupt state is reclaimed, and a persistence failure marks the run
   `storeDegraded` rather than taking down the MCP server.
 
-Model selection stays provider-specific. Grok Build's documented ACP startup
-flag supports `--model`; Cursor's documented ACP entry point defines no model
-parameter, so the Cursor adapter rejects `model` instead of faking it in text.
+Default `start` guidance is `provider: "grok"` with **no** `model`; Grok then
+uses its CLI default. Pass `model` only when the user names one. Cursor also
+accepts optional startup `--model` (`cursor-agent --model <id> acp`) so a
+billing pool can be pinned after a usage cap (for example `composer-2.5`).
+Omitting Cursor `model` uses the CLI `selectedModel`. Model values are
+validated as a single argv element and never concatenated into a prompt.
 
 ## Installation
 

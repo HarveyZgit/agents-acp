@@ -1,4 +1,4 @@
-# Installing agents-acp 0.2.2 into Codex
+# Installing agents-acp 0.2.3 into Codex
 
 ## Preconditions
 
@@ -114,8 +114,13 @@ requires no Codex login and no Cursor/Grok binaries.
 
 In Codex, then call:
 
-1. `list_providers` — confirm `cursor-agent acp` resolved and `configLoaded` is true.
-2. `start` with `mode: "review"` and a harmless prompt, with `cwd` inside `workspace`.
+1. `list_providers` — confirm `configLoaded` is true. Prefer Grok when it is
+   available. Cursor notes that `start.model` is an optional CLI pin for a
+   billing pool.
+2. `start` with `provider: "grok"`, `mode: "review"`, and a harmless prompt.
+   Omit `model` unless you need a specific Grok model. `cwd` must be inside
+   `workspace`. For Cursor quota pinning, pass `provider: "cursor"` and
+   `model: "composer-2.5"` (or omit `model` to use the CLI `selectedModel`).
 3. `status` while it runs, then `result` when it finishes.
 
 If a permission appears, `status` lists its `requestId` and the provider's
@@ -170,19 +175,19 @@ codex plugin marketplace remove agents-acp
 codex plugin marketplace add "$PWD"
 ```
 
-Restart Codex, then confirm the reported plugin version is 0.2.2.
+Restart Codex, then confirm the reported plugin version is 0.2.3.
 
 ## Archive
 
-`dist/agents-acp-0.2.2.zip` and `dist/agents-acp-0.2.2.tar.gz` contain the
+`dist/agents-acp-0.2.3.zip` and `dist/agents-acp-0.2.3.tar.gz` contain the
 plugin directory. Extract one, then point a marketplace entry's `source.path`
 at `./external-acp-collaboration` relative to that marketplace root.
 
 Rebuild them from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.2.2.tar.gz dist/agents-acp-0.2.2.zip
-tar -C . -czf dist/agents-acp-0.2.2.tar.gz external-acp-collaboration
-zip -qr dist/agents-acp-0.2.2.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.2.2.{tar.gz,zip}
+rm -f dist/agents-acp-0.2.3.tar.gz dist/agents-acp-0.2.3.zip
+tar -C . -czf dist/agents-acp-0.2.3.tar.gz external-acp-collaboration
+zip -qr dist/agents-acp-0.2.3.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.2.3.{tar.gz,zip}
 ```

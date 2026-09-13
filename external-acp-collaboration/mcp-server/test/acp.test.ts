@@ -180,11 +180,27 @@ test("session modes are read from the ACP SessionModeState object", () => {
   assert.deepEqual(readSessionModes({}), { availableModes: [] });
 });
 
-test("model arguments are passed only through documented provider capabilities", () => {
-  const cursor = new CursorProvider(new FixtureCursorProbe({}));
+test("model arguments are optional and passed only as startup CLI flags", () => {
+  const cursor = availableCursor();
+  assert.deepEqual(
+    cursor.command({ cwd: "/project", prompt: "task", mode: "review" }),
+    ["acp"],
+  );
+  assert.deepEqual(
+    cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "composer-2.5" }),
+    ["--model", "composer-2.5", "acp"],
+  );
+  assert.equal(cursor.capabilities.supportsModelSelection, true);
+  assert.equal(cursor.capabilities.modelSelection, "startup");
+  assert.match(cursor.discover().note ?? "", /billing pool|selectedModel/);
   assert.throws(
-    () => cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "model-x" }),
-    /Model selection unavailable/,
+    () => cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "--always-approve" }),
+    /cannot be interpreted as a CLI flag/,
+  );
+
+  assert.deepEqual(
+    new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan" }),
+    ["--no-auto-update", "--cwd", "/project", "agent", "--no-leader", "stdio"],
   );
   assert.deepEqual(
     new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "grok-build" }),
@@ -215,12 +231,15 @@ class FixtureCursorProbe implements CursorProbe {
   }
 }
 
-test("Cursor discovery selects only cursor-agent with ACP argv", () => {
-  const probe = new FixtureCursorProbe({
+function availableCursor(): CursorProvider {
+  return new CursorProvider(new FixtureCursorProbe({
     "cursor-agent --version": { status: 0, stdout: "Cursor Agent 1.2.3\n" },
     "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
-  });
-  const provider = new CursorProvider(probe);
+  }));
+}
+
+test("Cursor discovery selects only cursor-agent with ACP argv", () => {
+  const provider = availableCursor();
   const discovery = provider.discover();
   assert.equal(discovery.available, true);
   assert.equal(discovery.executable, "cursor-agent");

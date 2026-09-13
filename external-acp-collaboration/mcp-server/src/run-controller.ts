@@ -29,7 +29,7 @@ import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
 
-const CLIENT_VERSION = "0.2.2";
+const CLIENT_VERSION = "0.2.3";
 const SHORT_TIMEOUT_MS = 30_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const SHUTDOWN_GRACE_MS = 750;
