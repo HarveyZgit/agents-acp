@@ -43,10 +43,14 @@ test("plugin and MCP manifests agree on the agents-acp identity and version", ()
   const plugin = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
   const server = JSON.parse(readFileSync(join(pluginRoot, "mcp-server", "package.json"), "utf8"));
   const mcp = JSON.parse(readFileSync(join(pluginRoot, ".mcp.json"), "utf8"));
+  const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
   assert.equal(plugin.name, "agents-acp");
   assert.equal(plugin.mcpServers, "./.mcp.json");
   assert.ok(mcp.mcpServers["agents-acp"]);
   assert.equal(server.version, plugin.version);
+  assert.match(install, new RegExp(`agents-acp-${plugin.version}\\.tar\\.gz`));
+  assert.match(readme, new RegExp(plugin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("configuration file is primary and forwarded environment variables override it", () => {

@@ -5,7 +5,7 @@ import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
 import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
-const SERVER_VERSION = "0.2.3";
+const SERVER_VERSION = "0.2.4-pre.1";
 
 const config = loadConfig();
 const store = new RunStore(config.storePath);

@@ -1,5 +1,7 @@
 # agents-acp
 
+Current packaged version: **0.2.4-pre.1**.
+
 `agents-acp` is a Codex plugin that delegates a scoped task to a locally
 installed ACP-capable coding agent. The adapters target Grok Build
 (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`) and

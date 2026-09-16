@@ -1,4 +1,4 @@
-# Installing agents-acp 0.2.3 into Codex
+# Installing agents-acp 0.2.4-pre.1 into Codex
 
 ## Preconditions
 
@@ -175,19 +175,19 @@ codex plugin marketplace remove agents-acp
 codex plugin marketplace add "$PWD"
 ```
 
-Restart Codex, then confirm the reported plugin version is 0.2.3.
+Restart Codex, then confirm the reported plugin version is 0.2.4-pre.1.
 
 ## Archive
 
-`dist/agents-acp-0.2.3.zip` and `dist/agents-acp-0.2.3.tar.gz` contain the
+`dist/agents-acp-0.2.4-pre.1.zip` and `dist/agents-acp-0.2.4-pre.1.tar.gz` contain the
 plugin directory. Extract one, then point a marketplace entry's `source.path`
 at `./external-acp-collaboration` relative to that marketplace root.
 
 Rebuild them from the repository root without installing dependencies:
 
 ```bash
-rm -f dist/agents-acp-0.2.3.tar.gz dist/agents-acp-0.2.3.zip
-tar -C . -czf dist/agents-acp-0.2.3.tar.gz external-acp-collaboration
-zip -qr dist/agents-acp-0.2.3.zip external-acp-collaboration
-sha256sum dist/agents-acp-0.2.3.{tar.gz,zip}
+rm -f dist/agents-acp-0.2.4-pre.1.tar.gz dist/agents-acp-0.2.4-pre.1.zip
+tar -C . -czf dist/agents-acp-0.2.4-pre.1.tar.gz external-acp-collaboration
+zip -qr dist/agents-acp-0.2.4-pre.1.zip external-acp-collaboration
+sha256sum dist/agents-acp-0.2.4-pre.1.{tar.gz,zip}
 ```
