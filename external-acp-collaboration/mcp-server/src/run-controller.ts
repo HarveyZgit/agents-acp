@@ -29,6 +29,7 @@ import {
 import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
+import { overlayCatalogFixture, type EffortLevel, type ModelCatalog, type SpeedLevel } from "./models.ts";
 
 const CLIENT_VERSION = "0.2.4-pre.1";
 const SHORT_TIMEOUT_MS = 30_000;
@@ -42,6 +43,8 @@ export type StartRequest = {
   mode: TaskMode;
   allowImplement?: boolean;
   model?: string;
+  effort?: EffortLevel;
+  speed?: SpeedLevel;
   sessionId?: string;
 };
 
@@ -128,6 +131,14 @@ export class RunController {
     return [...this.providers.values()].map((provider) => provider.discover());
   }
 
+  listModels(provider?: ProviderName): ModelCatalog[] {
+    const selected = provider ? this.providers.get(provider) : undefined;
+    const targets = selected ? [selected] : [...this.providers.values()].filter((item) => item.name !== "fake");
+    return overlayCatalogFixture(
+      targets.map((item) => item.listModels({ envMode: this.envMode, envPassthrough: this.envPassthrough })),
+    );
+  }
+
   hasActiveRuns(): boolean {
     return [...this.runtime.values()].some((runtime) => !isTerminal(runtime.status));
   }
@@ -150,11 +161,15 @@ export class RunController {
 
     let record: RunRecord | undefined;
     try {
+      const catalog = request.provider === "cursor" || request.provider === "grok"
+        ? this.listModels(request.provider)[0]?.models ?? []
+        : [];
       const startOptions = {
         ...request,
         cwd: decision.cwd,
         envMode: this.envMode,
         envPassthrough: this.envPassthrough,
+        catalog,
       };
       provider.command(startOptions); // Validate optional model before creating a run.
       record = this.store.create({

@@ -1,0 +1,10 @@
+interface:
+  display_name: "Agents ACP dispatch"
+  short_description: "Dispatch a scoped task to Cursor CLI or Grok Build"
+  default_prompt: "Dispatch a scoped review or plan to the configured default ACP agent."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "agents-acp"
+      description: "Bundled agents-acp MCP server (start, status, result, cancel)."

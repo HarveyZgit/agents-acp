@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { isProjectLocalRuntimeDir, loadConfig, persistConfig } from "../src/config.ts";
+import { detectHost, isProjectLocalRuntimeDir, loadConfig, persistConfig } from "../src/config.ts";
 
 const pluginRoot = new URL("../../", import.meta.url).pathname;
 
@@ -25,6 +25,9 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
     "EXTERNAL_ACP_WORKSPACE",
     "EXTERNAL_ACP_DEFAULT_PROVIDER",
     "EXTERNAL_ACP_DEFAULT_MODEL",
+    "EXTERNAL_ACP_DEFAULT_EFFORT",
+    "EXTERNAL_ACP_DEFAULT_SPEED",
+    "EXTERNAL_ACP_CATALOG_FIXTURE",
     "EXTERNAL_ACP_ALLOWED_SUBTREES",
     "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
     "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
@@ -57,7 +60,7 @@ test("plugin and MCP manifests agree on the agents-acp identity and version", ()
   assert.match(readme, new RegExp(plugin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("plugin ships an invocable setup skill that uses get_config and configure", () => {
+test("plugin ships invocable $config and $dispatch skills", () => {
   const plugin = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.skills, "./skills/");
   const skillsRoot = join(pluginRoot, "skills");
@@ -69,18 +72,49 @@ test("plugin ships an invocable setup skill that uses get_config and configure",
     const match = /^name:\s*(\S+)/m.exec(body);
     return match ? [match[1]] : [];
   });
-  assert.deepEqual(new Set(names), new Set(["agents-acp", "agents-acp-setup"]));
+  assert.deepEqual(new Set(names), new Set(["config", "dispatch"]));
 
-  const setup = bodies.find((body) => /^name:\s*agents-acp-setup/m.test(body)) ?? "";
+  const setup = bodies.find((body) => /^name:\s*config$/m.test(body)) ?? "";
   assert.match(setup, /get_config/);
   assert.match(setup, /configure/);
   assert.match(setup, /userConfirmed/);
+  assert.match(setup, /catalog/);
+  assert.match(setup, /defaultEffort|defaultSpeed|Fast|High/);
   assert.match(setup, /Do not start an ACP run|do not call `start`/i);
+
+  const dispatch = bodies.find((body) => /^name:\s*dispatch$/m.test(body)) ?? "";
+  assert.match(dispatch, /config skill|`config`|\$config/);
+  assert.match(dispatch, /start/);
+  assert.match(dispatch, /Claude Code|native Codex or Claude/);
 
   const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
-  assert.match(install, /\$agents-acp-setup/);
-  assert.match(readme, /\$agents-acp-setup/);
+  assert.match(install, /\$config|\/plugin/);
+  assert.match(install, /Claude Code/);
+  assert.match(readme, /\$config/);
+  assert.match(readme, /\$dispatch/);
+  assert.match(readme, /Claude Code/);
+});
+
+test("plugin ships a Claude Code manifest that launches via CLAUDE_PLUGIN_ROOT", () => {
+  const claude = JSON.parse(readFileSync(join(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
+  const codex = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
+  const mcp = JSON.parse(readFileSync(join(pluginRoot, ".mcp.claude.json"), "utf8"));
+  const marketplace = JSON.parse(readFileSync(new URL("../../../.claude-plugin/marketplace.json", import.meta.url), "utf8"));
+  assert.equal(claude.name, "agents-acp");
+  assert.equal(claude.version, codex.version);
+  assert.equal(claude.skills, "./skills/");
+  assert.equal(claude.mcpServers, "./.mcp.claude.json");
+  const server = mcp.mcpServers["agents-acp"];
+  assert.equal(server.command, "node");
+  assert.deepEqual(server.args, [
+    "--experimental-strip-types",
+    "${CLAUDE_PLUGIN_ROOT}/mcp-server/src/index.ts",
+  ]);
+  assert.equal(server.env, undefined);
+  assert.equal(marketplace.name, "agents-acp");
+  assert.equal(marketplace.plugins[0].source, "./external-acp-collaboration");
+  assert.equal(marketplace.plugins[0].strict, true);
 });
 
 test("configuration file is primary and forwarded environment variables override it", () => {
@@ -120,6 +154,12 @@ test("configuration file is primary and forwarded environment variables override
   assert.equal(missing.envMode, "session");
   assert.equal(missing.storePath, join(directory, "runs.json"));
   assert.equal(fromFile.defaultProvider, undefined);
+
+  const poisoned = loadConfig({
+    AGENTS_ACP_CONFIG: configPath,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer 2.5 high fast",
+  });
+  assert.equal(poisoned.defaultModel, undefined);
 });
 
 test("runtime files stay under the central dir and ignore project-local .agents-acp", () => {
@@ -136,10 +176,23 @@ test("runtime files stay under the central dir and ignore project-local .agents-
     PLUGIN_DATA: localRuntime,
     CLAUDE_PLUGIN_DATA: localRuntime,
   });
+  assert.equal(detectHost({ CLAUDE_PLUGIN_DATA: localRuntime }), "codex");
+  assert.equal(fromPluginData.host, "codex");
   assert.equal(fromPluginData.configPath, join(home, ".codex", "agents-acp", "config.json"));
   assert.equal(fromPluginData.runtimeDir, join(home, ".codex", "agents-acp"));
   assert.equal(fromPluginData.workspace, undefined);
   assert.equal(fromPluginData.storePath, join(home, ".codex", "agents-acp", "runs.json"));
+
+  const fromCodex = loadConfig({ HOME: home });
+  assert.equal(fromCodex.host, "codex");
+  assert.equal(fromCodex.configPath, join(home, ".codex", "agents-acp", "config.json"));
+
+  const fromClaudeRoot = loadConfig({
+    HOME: home,
+    CLAUDE_PLUGIN_ROOT: join(home, "plugin-cache", "agents-acp"),
+  });
+  assert.equal(fromClaudeRoot.host, "claude");
+  assert.equal(fromClaudeRoot.runtimeDir, join(home, ".claude", "agents-acp"));
 
   const relocated = loadConfig({
     HOME: home,
@@ -158,20 +211,55 @@ test("configure persists defaults centrally and never writes the project", () =>
     workspace,
     defaultProvider: "cursor",
     defaultModel: "composer-2.5",
+    defaultEffort: "high",
+    defaultSpeed: "fast",
     enablePermissionResponses: true,
   }, env);
   assert.equal(saved.workspace, workspace);
   assert.equal(saved.defaultProvider, "cursor");
   assert.equal(saved.defaultModel, "composer-2.5");
+  assert.equal(saved.defaultEffort, "high");
+  assert.equal(saved.defaultSpeed, "fast");
   assert.equal(saved.configPath, join(home, ".codex", "agents-acp", "config.json"));
   const written = JSON.parse(readFileSync(saved.configPath, "utf8"));
   assert.equal(written.defaultProvider, "cursor");
   assert.equal(written.defaultModel, "composer-2.5");
+  assert.equal(written.defaultEffort, "high");
+  assert.equal(written.defaultSpeed, "fast");
   assert.equal(existsSync(join(workspace, ".agents-acp")), false);
 
   const cleared = persistConfig({ defaultModel: "" }, env);
   assert.equal(cleared.defaultModel, undefined);
-  assert.equal("defaultModel" in JSON.parse(readFileSync(saved.configPath, "utf8")), false);
+  assert.equal(cleared.defaultEffort, undefined);
+  assert.equal(cleared.defaultSpeed, undefined);
+  const clearedFile = JSON.parse(readFileSync(saved.configPath, "utf8"));
+  assert.equal("defaultModel" in clearedFile, false);
+  assert.equal("defaultEffort" in clearedFile, false);
+  assert.equal("defaultSpeed" in clearedFile, false);
+  assert.throws(
+    () => persistConfig({ defaultModel: "composer 2.5 high fast" }, env),
+    /catalog id|raw keyword/,
+  );
+
+  const fromLaunchId = persistConfig({
+    defaultProvider: "cursor",
+    defaultModel: "composer-2.5-high-fast",
+  }, env);
+  assert.equal(fromLaunchId.defaultModel, "composer-2.5");
+  assert.equal(fromLaunchId.defaultEffort, "high");
+  assert.equal(fromLaunchId.defaultSpeed, "fast");
+  const fromLaunchIdFile = JSON.parse(readFileSync(saved.configPath, "utf8"));
+  assert.equal(fromLaunchIdFile.defaultModel, "composer-2.5");
+  assert.equal(fromLaunchIdFile.defaultEffort, "high");
+  assert.equal(fromLaunchIdFile.defaultSpeed, "fast");
+
+  const envLaunch = loadConfig({
+    HOME: home,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer-2.5-high-fast",
+  });
+  assert.equal(envLaunch.defaultModel, "composer-2.5");
+  assert.equal(envLaunch.defaultEffort, "high");
+  assert.equal(envLaunch.defaultSpeed, "fast");
 
   const projectRuntime = join(workspace, ".agents-acp");
   const relocated = persistConfig({

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   AcpProvider,
   providerEnvironment,
@@ -9,6 +10,7 @@ import {
   type StartOptions,
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
+import { parseListModelsOutput, type EffortLevel, type ModelCatalog } from "../models.ts";
 
 export class GrokProvider extends AcpProvider {
   readonly name: ProviderName = "grok";
@@ -24,18 +26,51 @@ export class GrokProvider extends AcpProvider {
     if (!discovered.available) return discovered;
     return {
       ...discovered,
-      note: "Model is optional; omit start.model to use the Grok CLI default.",
+      note: "Model is optional; omit start.model to use the Grok CLI default. Effort is --effort, not a model-id suffix.",
     };
   }
 
   command(options: StartOptions): string[] {
     const model = safeModelId(options.model, "Grok");
     const modelArgs = model ? ["--model", model] : [];
+    const effortArgs = grokEffortArgs(options.effort);
     // Official ACP launch is `grok agent stdio`. `--no-auto-update` is the
     // documented scripting flag (global). `--no-leader` forces a local agent so
     // a Codex-spawned child does not need `~/.grok/leader.sock`. Never pass
     // `--always-approve`: each permission stays a user decision.
-    return ["--no-auto-update", "--cwd", options.cwd, "agent", "--no-leader", ...modelArgs, "stdio"];
+    return ["--no-auto-update", "--cwd", options.cwd, "agent", "--no-leader", ...modelArgs, ...effortArgs, "stdio"];
+  }
+
+  listModels(options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
+    const result = spawnSync(this.executable, ["models"], {
+      encoding: "utf8",
+      timeout: 8_000,
+      windowsHide: true,
+      shell: false,
+      env: this.environment({
+        cwd: process.cwd(),
+        prompt: "",
+        mode: "review",
+        envMode: options?.envMode ?? "session",
+        envPassthrough: options?.envPassthrough,
+      }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error || result.status !== 0) {
+      return {
+        provider: "grok",
+        available: false,
+        models: [],
+        error: "grok models is unavailable. Start Codex from the same login where grok models works.",
+      };
+    }
+    const models = parseListModelsOutput(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    return {
+      provider: "grok",
+      available: models.length > 0,
+      models,
+      error: models.length > 0 ? undefined : "grok listed no models for this account.",
+    };
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {
@@ -62,4 +97,8 @@ export class GrokProvider extends AcpProvider {
   protected environment(options: StartOptions): NodeJS.ProcessEnv {
     return providerEnvironment(options, ["XAI_", "GROK_"], ["XAI_API_KEY", "GROK_CONFIG_DIR", "GROK_HOME"]);
   }
+}
+
+function grokEffortArgs(effort?: EffortLevel): string[] {
+  return effort ? ["--effort", effort] : [];
 }

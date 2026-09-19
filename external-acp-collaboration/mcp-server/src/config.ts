@@ -2,9 +2,11 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { safeEffort, safeSpeed, storedModelParts, type EffortLevel, type SpeedLevel } from "./models.ts";
 
 export type EnvMode = "session" | "inherit" | "minimal";
 export type DefaultProviderName = "cursor" | "grok";
+export type HostKind = "claude" | "codex";
 
 export type PluginConfig = {
   workspace?: string;
@@ -19,15 +21,20 @@ export type PluginConfig = {
   enableFake: boolean;
   defaultProvider?: DefaultProviderName;
   defaultModel?: string;
+  defaultEffort?: EffortLevel;
+  defaultSpeed?: SpeedLevel;
   runtimeDir: string;
   configPath: string;
   configLoaded: boolean;
+  host: HostKind;
 };
 
 export type ConfigureRequest = {
   workspace?: string;
   defaultProvider?: DefaultProviderName;
   defaultModel?: string | null;
+  defaultEffort?: EffortLevel | null;
+  defaultSpeed?: SpeedLevel | null;
   enablePermissionResponses?: boolean;
 };
 
@@ -40,15 +47,16 @@ const CENTRAL_DIR_NAME = "agents-acp";
  * user's shell environment is present. Configuration therefore comes from a
  * stable on-disk file first; `env_vars` forwarded by Codex override it.
  *
- * Runtime files stay under ~/.codex/agents-acp (or AGENTS_ACP_HOME /
- * AGENTS_ACP_CONFIG). Project-local `.agents-acp` directories and PLUGIN_DATA
- * that would land there are ignored so the plugin never creates workspace
- * runtime files.
+ * Runtime files stay under ~/.codex/agents-acp or ~/.claude/agents-acp
+ * (or AGENTS_ACP_HOME / AGENTS_ACP_CONFIG). Claude Code is detected from
+ * CLAUDE_PLUGIN_ROOT only. Project-local `.agents-acp` directories are
+ * ignored so the plugin never creates workspace runtime files.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
   const runtimeDir = path.dirname(configPath);
   const file = readConfigFile(configPath);
+  const stored = ignoreInvalid(() => storedModelParts(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel)) ?? {};
   return {
     workspace: trimmed(env.EXTERNAL_ACP_WORKSPACE) ?? trimmed(file.workspace),
     allowedSubtrees: env.EXTERNAL_ACP_ALLOWED_SUBTREES !== undefined
@@ -81,10 +89,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
       : stringArray(file.cursorEnvPassthrough),
     enableFake: booleanSetting(env.EXTERNAL_ACP_ENABLE_FAKE, file.enableFake),
     defaultProvider: providerName(trimmed(env.EXTERNAL_ACP_DEFAULT_PROVIDER) ?? file.defaultProvider),
-    defaultModel: safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel),
+    defaultModel: stored.base,
+    defaultEffort: ignoreInvalid(() => optionalEnum(safeEffort(trimmed(env.EXTERNAL_ACP_DEFAULT_EFFORT) ?? file.defaultEffort))) ?? stored.effort,
+    defaultSpeed: ignoreInvalid(() => optionalEnum(safeSpeed(trimmed(env.EXTERNAL_ACP_DEFAULT_SPEED) ?? file.defaultSpeed))) ?? stored.speed,
     runtimeDir,
     configPath,
     configLoaded: file.loaded,
+    host: detectHost(env),
   };
 }
 
@@ -106,8 +117,13 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string 
   return path.join(centralRuntimeDir(env), "config.json");
 }
 
+export function detectHost(env: NodeJS.ProcessEnv = process.env): HostKind {
+  return trimmed(env.CLAUDE_PLUGIN_ROOT) ? "claude" : "codex";
+}
+
 export function centralRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
-  return path.join(homedirFrom(env), ".codex", CENTRAL_DIR_NAME);
+  const homeName = detectHost(env) === "claude" ? ".claude" : ".codex";
+  return path.join(homedirFrom(env), homeName, CENTRAL_DIR_NAME);
 }
 
 export function isProjectLocalRuntimeDir(directory: string): boolean {
@@ -117,7 +133,7 @@ export function isProjectLocalRuntimeDir(directory: string): boolean {
 export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
   if (isProjectLocalRuntimeDir(path.dirname(configPath))) {
-    throw new Error("agents-acp refuses to write a project-local .agents-acp directory. Runtime files stay in ~/.codex/agents-acp.");
+    throw new Error("agents-acp refuses to write a project-local .agents-acp directory. Runtime files stay in ~/.codex/agents-acp or ~/.claude/agents-acp.");
   }
   const existing = readConfigFile(configPath);
   const next: Record<string, unknown> = persistableFields(existing);
@@ -128,9 +144,26 @@ export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv 
     next.defaultProvider = provider;
   }
   if (updates.defaultModel !== undefined) {
-    const model = safeStoredModel(updates.defaultModel);
-    if (model) next.defaultModel = model;
-    else delete next.defaultModel;
+    const parts = storedModelParts(updates.defaultModel);
+    if (parts.base) {
+      next.defaultModel = parts.base;
+      if (updates.defaultEffort === undefined && parts.effort) next.defaultEffort = parts.effort;
+      if (updates.defaultSpeed === undefined && parts.speed) next.defaultSpeed = parts.speed;
+    } else {
+      delete next.defaultModel;
+      delete next.defaultEffort;
+      delete next.defaultSpeed;
+    }
+  }
+  if (updates.defaultEffort !== undefined) {
+    const effort = safeEffort(updates.defaultEffort);
+    if (effort) next.defaultEffort = effort;
+    else delete next.defaultEffort;
+  }
+  if (updates.defaultSpeed !== undefined) {
+    const speed = safeSpeed(updates.defaultSpeed);
+    if (speed) next.defaultSpeed = speed;
+    else delete next.defaultSpeed;
   }
   if (updates.enablePermissionResponses !== undefined) {
     next.enablePermissionResponses = updates.enablePermissionResponses === true;
@@ -169,6 +202,8 @@ function persistableFields(file: FileConfig): Record<string, unknown> {
     "enableFake",
     "defaultProvider",
     "defaultModel",
+    "defaultEffort",
+    "defaultSpeed",
   ] as const) {
     if (file[key] !== undefined) next[key] = file[key];
   }
@@ -205,17 +240,6 @@ function existingDirectory(value: string): string {
 
 function providerName(value: unknown): DefaultProviderName | undefined {
   return value === "cursor" || value === "grok" ? value : undefined;
-}
-
-function safeStoredModel(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") throw new Error("defaultModel must be a string.");
-  const model = value.trim();
-  if (!model) return undefined;
-  if (model.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(model)) {
-    throw new Error("defaultModel must be a documented model identifier and cannot be interpreted as a CLI flag.");
-  }
-  return model;
 }
 
 function homedirFrom(env: NodeJS.ProcessEnv): string {
@@ -260,4 +284,16 @@ function boundedInteger(
 
 function envMode(value: string | undefined): EnvMode {
   return value === "inherit" || value === "minimal" ? value : "session";
+}
+
+function optionalEnum<T>(value: T | null | undefined): T | undefined {
+  return value == null ? undefined : value;
+}
+
+function ignoreInvalid<T>(read: () => T | undefined): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
 }

@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { EnvMode } from "../config.ts";
+import type { CatalogModel, CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
 
 export type ProviderName = "cursor" | "grok" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
@@ -60,6 +61,9 @@ export type StartOptions = {
   prompt: string;
   mode: TaskMode;
   model?: string;
+  effort?: EffortLevel;
+  speed?: SpeedLevel;
+  catalog?: CatalogModel[];
   sessionId?: string;
   envMode?: EnvMode;
   envPassthrough?: string[];
@@ -326,6 +330,16 @@ export abstract class AcpProvider {
     return false;
   }
 
+  listModels(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
+    const provider = this.name === "cursor" || this.name === "grok" ? this.name : undefined;
+    return {
+      provider: (provider ?? "cursor") as CatalogProvider,
+      available: false,
+      models: [],
+      error: `${this.name} does not expose a model catalog.`,
+    };
+  }
+
   discover(): ProviderAvailability {
     const result = spawnSync(this.executable, ["--version"], {
       encoding: "utf8",
@@ -434,7 +448,7 @@ function pickEnvironment(names: string[]): NodeJS.ProcessEnv {
 export function safeModelId(model: string | undefined, label: string): string | undefined {
   if (model === undefined) return undefined;
   const value = model.trim();
-  if (!value || value.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(value)) {
+  if (!value || value.startsWith("-") || /\s/.test(value) || !/^[A-Za-z0-9._:/\-]{1,128}$/.test(value)) {
     throw new Error(`${label} model must be a documented model identifier and cannot be interpreted as a CLI flag.`);
   }
   return value;
