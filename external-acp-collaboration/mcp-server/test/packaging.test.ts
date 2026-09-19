@@ -57,7 +57,7 @@ test("plugin and MCP manifests agree on the agents-acp identity and version", ()
   assert.match(readme, new RegExp(plugin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("plugin ships an invocable setup skill that uses get_config and configure", () => {
+test("plugin ships invocable $config and $dispatch skills", () => {
   const plugin = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.skills, "./skills/");
   const skillsRoot = join(pluginRoot, "skills");
