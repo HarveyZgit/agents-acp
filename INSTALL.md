@@ -18,7 +18,7 @@ Configuration therefore lives in a file that the server reads directly:
 Runtime files are **only** `~/.codex/agents-acp` (or `AGENTS_ACP_HOME` /
 `AGENTS_ACP_CONFIG`). The plugin never creates a project-local `.agents-acp`
 directory. After the plugin is enabled, initialize or change defaults with
-the bundled skill — in Codex CLI / the IDE extension type `$agents-acp-setup`
+the bundled skill — in Codex CLI / the IDE extension type `$config`
 (or ask “初始化 agents-acp” / “把默认 agent 改成 grok”). That skill calls
 `get_config` then `configure`. Prefer it over hand-editing.
 
@@ -128,7 +128,7 @@ requires no Codex login and no Cursor/Grok binaries.
 
 In Codex, then:
 
-1. Invoke `$agents-acp-setup` (or ask to initialize / change the default
+1. Invoke `$config` (or ask to initialize / change the default
    agent or model). The skill calls `get_config` with `suggestedWorkspace`
    set to the project root. If `needsSetup` is true, it asks the returned
    `setupQuestions` (or uses the agent/model already named) and calls

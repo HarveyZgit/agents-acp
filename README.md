@@ -48,8 +48,8 @@ IDE extension, or `@` in ChatGPT):
 
 | Skill | Purpose |
 | --- | --- |
-| `$agents-acp-setup` | First-time init or later change of default agent / model / workspace |
-| `$agents-acp` | Delegate a scoped ACP run. Calls setup first when `needsSetup` |
+| `$config` | First-time init or later change of default agent / model / workspace |
+| `$dispatch` | Dispatch a scoped ACP run. Calls `$config` first when `needsSetup` |
 
 ### Protocol behavior
 
@@ -149,11 +149,11 @@ codex plugin marketplace add /absolute/path/to/agents-acp
 ```
 
 Or skip the seed file: after install, invoke the plugin skill
-`$agents-acp-setup` (or ask Codex to initialize / change the default agent
+`$config` (or ask Codex to initialize / change the default agent
 or model). That skill calls `get_config` then `configure` and writes
 `~/.codex/agents-acp`. The plugin never creates `.agents-acp` in a project.
 
-A later `$agents-acp` run uses those stored defaults. `$agents-acp-setup`
+A later `$dispatch` run uses those stored defaults. `$config`
 again changes the default agent or model without starting a run.
 
 Any `EXTERNAL_ACP_*` variable listed in the plugin's `.mcp.json` `env_vars`

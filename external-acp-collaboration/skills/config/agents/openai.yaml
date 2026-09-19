@@ -1,7 +1,7 @@
 interface:
-  display_name: "Agents ACP setup"
+  display_name: "Agents ACP config"
   short_description: "Initialize or change the default ACP agent and model"
-  default_prompt: "Initialize or update agents-acp defaults for this workspace. Ask which agent (cursor or grok) and optional model to store, then persist them."
+  default_prompt: "Configure agents-acp defaults for this workspace. Ask which agent (cursor or grok) and optional model to store, then persist them."
 
 dependencies:
   tools:

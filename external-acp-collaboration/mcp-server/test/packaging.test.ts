@@ -69,18 +69,23 @@ test("plugin ships an invocable setup skill that uses get_config and configure",
     const match = /^name:\s*(\S+)/m.exec(body);
     return match ? [match[1]] : [];
   });
-  assert.deepEqual(new Set(names), new Set(["agents-acp", "agents-acp-setup"]));
+  assert.deepEqual(new Set(names), new Set(["config", "dispatch"]));
 
-  const setup = bodies.find((body) => /^name:\s*agents-acp-setup/m.test(body)) ?? "";
+  const setup = bodies.find((body) => /^name:\s*config$/m.test(body)) ?? "";
   assert.match(setup, /get_config/);
   assert.match(setup, /configure/);
   assert.match(setup, /userConfirmed/);
   assert.match(setup, /Do not start an ACP run|do not call `start`/i);
 
+  const dispatch = bodies.find((body) => /^name:\s*dispatch$/m.test(body)) ?? "";
+  assert.match(dispatch, /\$config/);
+  assert.match(dispatch, /start/);
+
   const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
-  assert.match(install, /\$agents-acp-setup/);
-  assert.match(readme, /\$agents-acp-setup/);
+  assert.match(install, /\$config/);
+  assert.match(readme, /\$config/);
+  assert.match(readme, /\$dispatch/);
 });
 
 test("configuration file is primary and forwarded environment variables override it", () => {
