@@ -166,6 +166,82 @@ test("MCP configure clears model, effort, and speed together", async () => {
   assert.equal("defaultSpeed" in written, false);
 });
 
+test("MCP start resolves an explicit model keyword without login", async () => {
+  const home = mkdtempSync(join(tmpdir(), "agents-acp-cat-start-"));
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-cat-startws-"));
+  const { responses } = await callMcp({
+    HOME: home,
+    EXTERNAL_ACP_WORKSPACE: workspace,
+    EXTERNAL_ACP_DEFAULT_PROVIDER: "cursor",
+    EXTERNAL_ACP_CATALOG_FIXTURE: catalogFixture,
+    EXTERNAL_ACP_ENABLE_FAKE: "1",
+  }, [
+    {
+      id: 1,
+      name: "start",
+      args: {
+        provider: "cursor",
+        cwd: workspace,
+        prompt: "keyword launch",
+        mode: "review",
+        model: "composer 2.5",
+        effort: "high",
+        speed: "fast",
+      },
+    },
+    {
+      id: 2,
+      name: "start",
+      args: {
+        provider: "fake",
+        cwd: workspace,
+        prompt: "after keyword resolve",
+        mode: "review",
+      },
+    },
+  ]);
+  const cursorStart = toolResult(responses, 1);
+  assert.equal(cursorStart.isError, true);
+  assert.match(cursorStart.body.error, /cursor-agent ACP is unavailable|not found on PATH|unavailable on PATH/i);
+  assert.equal(/catalog is unavailable|No cursor catalog model matches|raw keyword/i.test(cursorStart.body.error), false);
+  const fakeStart = toolResult(responses, 2);
+  assert.equal(fakeStart.isError, false, fakeStart.body.error);
+});
+
+test("MCP env launch id is stored as base + Fast/High, not doubled", async () => {
+  const home = mkdtempSync(join(tmpdir(), "agents-acp-cat-envlaunch-"));
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-cat-envlaunchws-"));
+  const configPath = join(home, "config.json");
+  writeFileSync(configPath, JSON.stringify({
+    workspace,
+    defaultProvider: "cursor",
+    enableFake: true,
+  }));
+  const loaded = loadConfig({
+    HOME: home,
+    AGENTS_ACP_CONFIG: configPath,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer-2.5-high-fast",
+    EXTERNAL_ACP_CATALOG_FIXTURE: catalogFixture,
+  });
+  assert.equal(loaded.defaultModel, "composer-2.5");
+  assert.equal(loaded.defaultEffort, "high");
+  assert.equal(loaded.defaultSpeed, "fast");
+
+  const { responses } = await callMcp({
+    HOME: home,
+    AGENTS_ACP_CONFIG: configPath,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer-2.5-high-fast",
+    EXTERNAL_ACP_ENABLE_FAKE: "1",
+    EXTERNAL_ACP_CATALOG_FIXTURE: catalogFixture,
+  }, [{ id: 1, name: "get_config", args: {} }]);
+  const snapshot = toolResult(responses, 1);
+  assert.equal(snapshot.body.defaultModel, "composer-2.5");
+  assert.equal(snapshot.body.defaultEffort, "high");
+  assert.equal(snapshot.body.defaultSpeed, "fast");
+  assert.equal(snapshot.body.launchModel, "composer-2.5-high-fast");
+  assert.equal(String(snapshot.body.launchModel).includes("high-fast-high-fast"), false);
+});
+
 test("MCP env default model cannot inject a raw keyword", async () => {
   const home = mkdtempSync(join(tmpdir(), "agents-acp-cat-env-"));
   const workspace = mkdtempSync(join(tmpdir(), "agents-acp-cat-envws-"));

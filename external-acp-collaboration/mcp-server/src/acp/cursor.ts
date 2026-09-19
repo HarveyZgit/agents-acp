@@ -120,8 +120,9 @@ export class CursorProvider extends AcpProvider {
     const resolved = this.resolve();
     if (!resolved) throw new Error("cursor-agent ACP is unavailable on PATH. This provider intentionally does not fall back to cursor or agent.");
     const model = safeModelId(options.model, "Cursor");
+    const catalog = options.catalog ?? this.listModels(options).models;
     const launch = model
-      ? composeCursorLaunchId(model, options.effort, options.speed)
+      ? composeCursorLaunchId(model, options.effort, options.speed, catalog)
       : undefined;
     // Official ACP docs omit a universal model field; the CLI still accepts
     // `cursor-agent --model <id> acp`. Effort/speed are encoded in that id.

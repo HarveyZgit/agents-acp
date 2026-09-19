@@ -6,6 +6,7 @@ import {
   parseCatalogId,
   parseListModelsOutput,
   resolveModelSelection,
+  storedModelParts,
 } from "../src/models.ts";
 
 const catalogText = `
@@ -87,4 +88,19 @@ test("composes Cursor launch ids from stored base + effort + speed", () => {
   assert.equal(composeCursorLaunchId("composer-2.5", "high", "fast", catalog), "composer-2.5-high-fast");
   assert.equal(composeCursorLaunchId("composer-2.5", undefined, "fast", catalog), "composer-2.5-fast");
   assert.equal(composeCursorLaunchId("composer-2.5", "high", "standard"), "composer-2.5-high");
+  assert.equal(composeCursorLaunchId("composer-2.5-high-fast", "high", "fast"), "composer-2.5-high-fast");
+  assert.equal(composeCursorLaunchId("composer-2.5-high-fast"), "composer-2.5-high-fast");
+  const suffixOnly = parseListModelsOutput("composer-2.5-high-fast - Composer 2.5 High Fast\n");
+  assert.equal(composeCursorLaunchId("composer-2.5", undefined, undefined, suffixOnly), "composer-2.5-high-fast");
+});
+
+test("storedModelParts strips launch suffixes and rejects raw keywords", () => {
+  assert.deepEqual(storedModelParts("composer-2.5-high-fast"), {
+    base: "composer-2.5",
+    effort: "high",
+    speed: "fast",
+  });
+  assert.deepEqual(storedModelParts("composer-2.5"), { base: "composer-2.5" });
+  assert.deepEqual(storedModelParts(""), {});
+  assert.throws(() => storedModelParts("composer 2.5 high fast"), /catalog id|raw keyword/);
 });

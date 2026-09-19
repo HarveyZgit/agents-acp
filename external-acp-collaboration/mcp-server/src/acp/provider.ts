@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { EnvMode } from "../config.ts";
-import type { CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
+import type { CatalogModel, CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
 
 export type ProviderName = "cursor" | "grok" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
@@ -63,6 +63,7 @@ export type StartOptions = {
   model?: string;
   effort?: EffortLevel;
   speed?: SpeedLevel;
+  catalog?: CatalogModel[];
   sessionId?: string;
   envMode?: EnvMode;
   envPassthrough?: string[];
@@ -447,7 +448,7 @@ function pickEnvironment(names: string[]): NodeJS.ProcessEnv {
 export function safeModelId(model: string | undefined, label: string): string | undefined {
   if (model === undefined) return undefined;
   const value = model.trim();
-  if (!value || value.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(value)) {
+  if (!value || value.startsWith("-") || /\s/.test(value) || !/^[A-Za-z0-9._:/\-]{1,128}$/.test(value)) {
     throw new Error(`${label} model must be a documented model identifier and cannot be interpreted as a CLI flag.`);
   }
   return value;

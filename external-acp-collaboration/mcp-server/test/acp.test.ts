@@ -194,6 +194,17 @@ test("model arguments are optional and passed only as startup CLI flags", () => 
     cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "composer-2.5", effort: "high", speed: "fast" }),
     ["--model", "composer-2.5-high-fast", "acp"],
   );
+  assert.deepEqual(
+    cursor.command({
+      cwd: "/project",
+      prompt: "task",
+      mode: "review",
+      model: "composer-2.5-high-fast",
+      effort: "high",
+      speed: "fast",
+    }),
+    ["--model", "composer-2.5-high-fast", "acp"],
+  );
   assert.equal(cursor.capabilities.supportsModelSelection, true);
   assert.equal(cursor.capabilities.modelSelection, "startup");
   assert.match(cursor.discover().note ?? "", /effort|speed|catalog|composer-2.5-high-fast/);
@@ -258,6 +269,21 @@ test("Cursor listModels parses --list-models catalog rows", () => {
   const catalog = provider.listModels();
   assert.equal(catalog.available, true);
   assert.equal(catalog.models.some((model) => model.id === "composer-2.5-high-fast" && model.base === "composer-2.5"), true);
+});
+
+test("Cursor command uses the catalog when only suffixed launch ids exist", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent --version": { status: 0, stdout: "1.0.0\n" },
+    "cursor-agent acp --help": { status: 0, stdout: "acp\n" },
+    "cursor-agent --list-models": {
+      status: 0,
+      stdout: "Available models\ncomposer-2.5-high-fast - Composer 2.5 High Fast\n",
+    },
+  }));
+  assert.deepEqual(
+    provider.command({ cwd: "/project", prompt: "task", mode: "review", model: "composer-2.5" }),
+    ["--model", "composer-2.5-high-fast", "acp"],
+  );
 });
 
 test("Cursor discovery selects only cursor-agent with ACP argv", () => {

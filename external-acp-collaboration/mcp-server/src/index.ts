@@ -256,7 +256,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
         onlyKeys(args, []);
         result = {
           providers: controller.listProviders(),
-          ...publicConfig(config),
+          ...publicConfig(config, controller.listModels()),
         };
         break;
       case "get_config":
@@ -433,7 +433,8 @@ function createPolicy(next: PluginConfig): WorkspacePolicy {
   );
 }
 
-function publicConfig(next: PluginConfig) {
+function publicConfig(next: PluginConfig, catalogs: ModelCatalog[] = []) {
+  const catalog = catalogs.find((item) => item.provider === next.defaultProvider)?.models ?? [];
   return {
     runtimeDir: next.runtimeDir,
     configPath: next.configPath,
@@ -444,7 +445,7 @@ function publicConfig(next: PluginConfig) {
     defaultEffort: next.defaultEffort,
     defaultSpeed: next.defaultSpeed,
     launchModel: next.defaultProvider && next.defaultModel
-      ? launchModelFor(next.defaultProvider, next.defaultModel, next.defaultEffort, next.defaultSpeed)
+      ? launchModelFor(next.defaultProvider, next.defaultModel, next.defaultEffort, next.defaultSpeed, catalog)
       : undefined,
     enablePermissionResponses: next.enablePermissionResponses,
     needsSetup: !next.workspace || !next.defaultProvider,
@@ -460,8 +461,8 @@ function configSnapshot(suggestedWorkspace?: string) {
     version: provider.version,
     note: provider.note,
   }));
-  const snapshot = publicConfig(config);
   const catalogs = controller.listModels();
+  const snapshot = publicConfig(config, catalogs);
   return {
     ...snapshot,
     providers,
@@ -592,8 +593,9 @@ function launchModelFor(
   model: string,
   effort?: EffortLevel,
   speed?: SpeedLevel,
+  catalog: ModelCatalog["models"] = [],
 ): string {
-  return provider === "cursor" ? composeCursorLaunchId(model, effort, speed) : model;
+  return provider === "cursor" ? composeCursorLaunchId(model, effort, speed, catalog) : model;
 }
 
 function modelSetupQuestions(catalog?: ModelCatalog) {

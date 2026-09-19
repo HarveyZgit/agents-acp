@@ -161,11 +161,15 @@ export class RunController {
 
     let record: RunRecord | undefined;
     try {
+      const catalog = request.provider === "cursor" || request.provider === "grok"
+        ? this.listModels(request.provider)[0]?.models ?? []
+        : [];
       const startOptions = {
         ...request,
         cwd: decision.cwd,
         envMode: this.envMode,
         envPassthrough: this.envPassthrough,
+        catalog,
       };
       provider.command(startOptions); // Validate optional model before creating a run.
       record = this.store.create({

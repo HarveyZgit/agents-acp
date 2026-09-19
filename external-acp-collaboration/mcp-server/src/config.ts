@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { safeEffort, safeSpeed, type EffortLevel, type SpeedLevel } from "./models.ts";
+import { safeEffort, safeSpeed, storedModelParts, type EffortLevel, type SpeedLevel } from "./models.ts";
 
 export type EnvMode = "session" | "inherit" | "minimal";
 export type DefaultProviderName = "cursor" | "grok";
@@ -49,14 +49,14 @@ const CENTRAL_DIR_NAME = "agents-acp";
  *
  * Runtime files stay under ~/.codex/agents-acp or ~/.claude/agents-acp
  * (or AGENTS_ACP_HOME / AGENTS_ACP_CONFIG). Claude Code is detected from
- * CLAUDE_PLUGIN_ROOT / CLAUDE_PLUGIN_DATA. Project-local `.agents-acp`
- * directories and PLUGIN_DATA that would land there are ignored so the
- * plugin never creates workspace runtime files.
+ * CLAUDE_PLUGIN_ROOT only. Project-local `.agents-acp` directories are
+ * ignored so the plugin never creates workspace runtime files.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
   const runtimeDir = path.dirname(configPath);
   const file = readConfigFile(configPath);
+  const stored = ignoreInvalid(() => storedModelParts(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel)) ?? {};
   return {
     workspace: trimmed(env.EXTERNAL_ACP_WORKSPACE) ?? trimmed(file.workspace),
     allowedSubtrees: env.EXTERNAL_ACP_ALLOWED_SUBTREES !== undefined
@@ -89,9 +89,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
       : stringArray(file.cursorEnvPassthrough),
     enableFake: booleanSetting(env.EXTERNAL_ACP_ENABLE_FAKE, file.enableFake),
     defaultProvider: providerName(trimmed(env.EXTERNAL_ACP_DEFAULT_PROVIDER) ?? file.defaultProvider),
-    defaultModel: ignoreInvalid(() => safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel)),
-    defaultEffort: ignoreInvalid(() => optionalEnum(safeEffort(trimmed(env.EXTERNAL_ACP_DEFAULT_EFFORT) ?? file.defaultEffort))),
-    defaultSpeed: ignoreInvalid(() => optionalEnum(safeSpeed(trimmed(env.EXTERNAL_ACP_DEFAULT_SPEED) ?? file.defaultSpeed))),
+    defaultModel: stored.base,
+    defaultEffort: ignoreInvalid(() => optionalEnum(safeEffort(trimmed(env.EXTERNAL_ACP_DEFAULT_EFFORT) ?? file.defaultEffort))) ?? stored.effort,
+    defaultSpeed: ignoreInvalid(() => optionalEnum(safeSpeed(trimmed(env.EXTERNAL_ACP_DEFAULT_SPEED) ?? file.defaultSpeed))) ?? stored.speed,
     runtimeDir,
     configPath,
     configLoaded: file.loaded,
@@ -144,9 +144,11 @@ export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv 
     next.defaultProvider = provider;
   }
   if (updates.defaultModel !== undefined) {
-    const model = safeStoredModel(updates.defaultModel);
-    if (model) {
-      next.defaultModel = model;
+    const parts = storedModelParts(updates.defaultModel);
+    if (parts.base) {
+      next.defaultModel = parts.base;
+      if (updates.defaultEffort === undefined && parts.effort) next.defaultEffort = parts.effort;
+      if (updates.defaultSpeed === undefined && parts.speed) next.defaultSpeed = parts.speed;
     } else {
       delete next.defaultModel;
       delete next.defaultEffort;
@@ -238,17 +240,6 @@ function existingDirectory(value: string): string {
 
 function providerName(value: unknown): DefaultProviderName | undefined {
   return value === "cursor" || value === "grok" ? value : undefined;
-}
-
-function safeStoredModel(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") throw new Error("defaultModel must be a string.");
-  const model = value.trim();
-  if (!model) return undefined;
-  if (model.startsWith("-") || /\s/.test(model) || !/^[A-Za-z0-9._:/\-]{1,128}$/.test(model)) {
-    throw new Error("defaultModel must be a catalog id resolved from the agent model list, not a raw keyword.");
-  }
-  return model;
 }
 
 function homedirFrom(env: NodeJS.ProcessEnv): string {

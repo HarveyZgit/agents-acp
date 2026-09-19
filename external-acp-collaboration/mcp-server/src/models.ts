@@ -195,20 +195,48 @@ export function composeCursorLaunchId(
   speed?: SpeedLevel,
   catalog: CatalogModel[] = [],
 ): string {
-  const ids = candidateCursorIds(base, effort, speed);
+  const parsed = parseCatalogId(base.trim());
+  const resolvedBase = parsed.base;
+  const resolvedEffort = effort ?? parsed.effort;
+  const resolvedSpeed = speed ?? (base.trim().endsWith("-fast") ? "fast" : undefined);
+  const ids = candidateCursorIds(resolvedBase, resolvedEffort, resolvedSpeed);
   if (catalog.length > 0) {
     const available = new Set(catalog.map((model) => model.id));
     const hit = ids.find((id) => available.has(id));
     if (hit) return hit;
-    const sameBase = catalog.filter((model) => model.base === base);
+    const sameBase = catalog.filter((model) => model.base === resolvedBase);
     const byParams = sameBase.find((model) => (
-      (effort === undefined || model.effort === effort)
-      && (speed === undefined || model.speed === speed)
+      (resolvedEffort === undefined || model.effort === resolvedEffort)
+      && (resolvedSpeed === undefined || model.speed === resolvedSpeed)
     ));
     if (byParams) return byParams.id;
     if (sameBase[0]) return sameBase[0].id;
   }
-  return ids[0] ?? base;
+  return ids[0] ?? resolvedBase;
+}
+
+/**
+ * Persist only a catalog base id. Effort/speed suffixes on a launch id
+ * (composer-2.5-high-fast) are returned separately so they never get stored
+ * inside defaultModel and then doubled at launch.
+ */
+export function storedModelParts(value: unknown): {
+  base?: string;
+  effort?: EffortLevel;
+  speed?: SpeedLevel;
+} {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "string") throw new Error("defaultModel must be a string.");
+  const model = value.trim();
+  if (!model) return {};
+  if (!looksLikeModelId(model)) {
+    throw new Error("defaultModel must be a catalog id resolved from the agent model list, not a raw keyword.");
+  }
+  const parsed = parseCatalogId(model);
+  const parts: { base: string; effort?: EffortLevel; speed?: SpeedLevel } = { base: parsed.base };
+  if (parsed.effort) parts.effort = parsed.effort;
+  if (model.endsWith("-fast")) parts.speed = "fast";
+  return parts;
 }
 
 export function looksLikeModelId(value: string): boolean {

@@ -241,6 +241,26 @@ test("configure persists defaults centrally and never writes the project", () =>
     /catalog id|raw keyword/,
   );
 
+  const fromLaunchId = persistConfig({
+    defaultProvider: "cursor",
+    defaultModel: "composer-2.5-high-fast",
+  }, env);
+  assert.equal(fromLaunchId.defaultModel, "composer-2.5");
+  assert.equal(fromLaunchId.defaultEffort, "high");
+  assert.equal(fromLaunchId.defaultSpeed, "fast");
+  const fromLaunchIdFile = JSON.parse(readFileSync(saved.configPath, "utf8"));
+  assert.equal(fromLaunchIdFile.defaultModel, "composer-2.5");
+  assert.equal(fromLaunchIdFile.defaultEffort, "high");
+  assert.equal(fromLaunchIdFile.defaultSpeed, "fast");
+
+  const envLaunch = loadConfig({
+    HOME: home,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer-2.5-high-fast",
+  });
+  assert.equal(envLaunch.defaultModel, "composer-2.5");
+  assert.equal(envLaunch.defaultEffort, "high");
+  assert.equal(envLaunch.defaultSpeed, "fast");
+
   const projectRuntime = join(workspace, ".agents-acp");
   const relocated = persistConfig({
     defaultProvider: "grok",
