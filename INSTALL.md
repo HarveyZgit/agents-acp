@@ -53,7 +53,8 @@ they exist in its own environment, and they override the config file:
 `EXTERNAL_ACP_IDLE_TIMEOUT_MS`, `EXTERNAL_ACP_STORE_PATH`,
 `EXTERNAL_ACP_ENV_MODE`, `EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH`, and the
 provider/session variables (`HOME`, `PATH`, `SHELL`, `SSH_AUTH_SOCK`,
-`SECURITYSESSIONID`, `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, `XAI_API_KEY`, …).
+`SECURITYSESSIONID`, `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`,
+`AGENT_CLI_CREDENTIAL_STORE`, `XAI_API_KEY`, …).
 Never put secret values in the plugin manifest; `env_vars` forwards names only.
 
 ## 2. Install the plugin
@@ -129,16 +130,21 @@ offered `options`. Choose one yourself and call `respond_permission` with that
 
 ### If Cursor reports an authentication problem
 
-`cursor-agent` login state lives in its CLI config and the OS keychain. Start
-Codex from the same user session where `cursor-agent status` reports a login.
+`cursor-agent` tokens live in the macOS keychain (or `~/.cursor/auth.json` when
+`AGENT_CLI_CREDENTIAL_STORE=file`). `cli-config.json` only stores profile
+metadata. Start Codex from the same user session where `cursor-agent status`
+reports a login, and optionally forward `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN`.
 If a session still cannot be created, the failure text names the ACP stage, the
 JSON-RPC code, the advertised auth methods, and a sanitized stderr tail. A
-`-32602` from `authenticate(cursor_login)` is treated as "protocol authenticate
-is invalid or unnecessary" and the plugin retries the session without
-authenticate. When `cursor-agent status` already shows a login, the plugin
-never tells you to log in again. A `terminal` auth method is never sent to
-`authenticate`; the failure then explains that the ACP child could not reuse
-the existing CLI session.
+`-32602` from `authenticate(cursor_login)` is retried once against
+`session/new` for older CLIs; if the retry is still `auth_required`, that code
+means authenticate itself failed (no browser in the Codex child, unknown
+method, or timeout), not that a login already exists. When
+`cursor-agent status` already shows a login, the plugin never tells you to log
+in again. A later `Failed to initialize session services` is reported as a
+session-service error, not a missing login. A `terminal` auth method is never
+sent to `authenticate`; the failure then explains that the ACP child could not
+reuse the existing CLI session.
 
 ### If Grok reports Permission denied on session/new
 

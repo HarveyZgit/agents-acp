@@ -55,7 +55,7 @@ export class GrokProvider extends AcpProvider {
     return true;
   }
 
-  cliSessionKnownGood(): boolean {
+  cliSessionKnownGood(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): boolean {
     return process.env.XAI_API_KEY !== undefined;
   }
 

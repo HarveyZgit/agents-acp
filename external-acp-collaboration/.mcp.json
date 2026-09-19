@@ -47,6 +47,7 @@
         "CURSOR_API_KEY",
         "CURSOR_AUTH_TOKEN",
         "CURSOR_CONFIG_DIR",
+        "AGENT_CLI_CREDENTIAL_STORE",
         "XAI_API_KEY",
         "GROK_CONFIG_DIR"
       ]

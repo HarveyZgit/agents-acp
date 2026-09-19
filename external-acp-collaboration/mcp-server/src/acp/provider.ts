@@ -9,7 +9,7 @@ export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refu
 
 /** ACP reserves -32000 for `auth_required`. */
 export const AUTH_REQUIRED_CODE = -32000;
-/** JSON-RPC Invalid params. Cursor returns this for `authenticate(cursor_login)` when a CLI session already exists. */
+/** JSON-RPC Invalid params. Current cursor-agent uses this for a failed `authenticate(cursor_login)` attempt. */
 export const INVALID_PARAMS_CODE = -32602;
 
 export type AuthMethod = {
@@ -318,9 +318,11 @@ export abstract class AcpProvider {
   /**
    * True when the provider's own CLI already has a usable session (for
    * example `cursor-agent status` reports logged in). Used only to avoid
-   * telling an already-authenticated operator to log in.
+   * telling an already-authenticated operator to log in. Pass the same
+   * environment mode the ACP child will receive so the probe can see
+   * keychain/session variables.
    */
-  cliSessionKnownGood(): boolean {
+  cliSessionKnownGood(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): boolean {
     return false;
   }
 

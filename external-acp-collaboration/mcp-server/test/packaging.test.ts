@@ -30,6 +30,7 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
     "EXTERNAL_ACP_ENV_MODE",
     "CURSOR_API_KEY",
     "CURSOR_AUTH_TOKEN",
+    "AGENT_CLI_CREDENTIAL_STORE",
     "XAI_API_KEY",
     "HOME",
     "PATH",

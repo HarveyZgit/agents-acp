@@ -48,15 +48,17 @@ streamed text to disk; streamed text stays in memory while the server runs.
   triggers `authenticate`, and only with an advertised non-terminal method.
   Auth descriptors are read from either `methodId` or `id`. A terminal-only
   method is never sent to `authenticate`. If `authenticate(cursor_login)`
-  returns `-32602` (Invalid params), the plugin treats protocol authenticate as
-  invalid or unnecessary for that Cursor build when a CLI session exists, then
-  retries `session/new` without authenticate. The same `-32602` retry applies
-  when a provider authenticates first. Grok authenticate includes
-  `_meta.headless: true` as in the official x.ai ACP scripting example.
-  When the pre-authenticated path was used and `cursor-agent status` is
-  already good, failures never tell the operator to log in or to run
-  `cursor-agent login`. A bare `Permission denied` from `session/new` is
-  expanded to name workspace and provider-session file access.
+  returns `-32602` (Invalid params), the plugin retries `session/new` once in
+  case an older CLI already had a usable session. If that retry still reports
+  `auth_required`, the `-32602` is treated as a failed authenticate (unknown
+  method, no browser, or login timeout) — not as proof that login already
+  exists. The same one-shot retry applies when a provider authenticates first.
+  Grok authenticate includes `_meta.headless: true` as in the official x.ai
+  ACP scripting example. When `cursor-agent status` is already good, failures
+  never tell the operator to log in again. A later `session/new` failure such
+  as `Failed to initialize session services` is reported as that service
+  error, not as a missing login. A bare `Permission denied` from
+  `session/new` is expanded to name workspace and provider-session file access.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
   `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,

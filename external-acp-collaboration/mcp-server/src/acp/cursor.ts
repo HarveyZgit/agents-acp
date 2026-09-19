@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
   AcpProvider,
-  baseEnvironment,
   providerEnvironment,
   safeModelId,
   type AuthMethod,
@@ -26,7 +25,29 @@ export type CursorProbeResult = {
 };
 
 export interface CursorProbe {
-  run(executable: string, args: string[]): CursorProbeResult;
+  run(executable: string, args: string[], env?: NodeJS.ProcessEnv): CursorProbeResult;
+}
+
+const CURSOR_ENV_NAMES = [
+  "CURSOR_API_KEY",
+  "CURSOR_AUTH_TOKEN",
+  "CURSOR_CONFIG_DIR",
+  "AGENT_CLI_CREDENTIAL_STORE",
+];
+
+/** Same allowlist the ACP child receives, including keychain/session variables. */
+export function cursorChildEnvironment(options: StartOptions): NodeJS.ProcessEnv {
+  return providerEnvironment(options, ["CURSOR_"], CURSOR_ENV_NAMES);
+}
+
+function probeEnvironment(options?: Pick<StartOptions, "envMode" | "envPassthrough">): NodeJS.ProcessEnv {
+  return cursorChildEnvironment({
+    cwd: process.cwd(),
+    prompt: "",
+    mode: "review",
+    envMode: options?.envMode ?? "session",
+    envPassthrough: options?.envPassthrough,
+  });
 }
 
 type ResolvedCursorLaunch = {
@@ -36,13 +57,13 @@ type ResolvedCursorLaunch = {
 };
 
 class ProcessCursorProbe implements CursorProbe {
-  run(executable: string, args: string[]): CursorProbeResult {
+  run(executable: string, args: string[], env: NodeJS.ProcessEnv = probeEnvironment()): CursorProbeResult {
     const result = spawnSync(executable, args, {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
       shell: false,
-      env: baseEnvironment(),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     return {
@@ -112,8 +133,8 @@ export class CursorProvider extends AcpProvider {
     return true;
   }
 
-  cliSessionKnownGood(): boolean {
-    const result = this.probe.run(EXECUTABLE, ["status"]);
+  cliSessionKnownGood(options?: Pick<StartOptions, "envMode" | "envPassthrough">): boolean {
+    const result = this.probe.run(EXECUTABLE, ["status"], probeEnvironment(options));
     if (!succeeded(result)) return false;
     const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     if (/not logged in|logged out|unauthenticated/i.test(text)) return false;
@@ -121,9 +142,10 @@ export class CursorProvider extends AcpProvider {
   }
 
   protected environment(options: StartOptions): NodeJS.ProcessEnv {
-    // Cursor login state lives in the user's CLI config and OS keychain, so the
-    // child needs the session context Codex itself was started with.
-    return providerEnvironment(options, ["CURSOR_"], ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN", "CURSOR_CONFIG_DIR"]);
+    // Tokens live in the macOS keychain (or ~/.cursor/auth.json when
+    // AGENT_CLI_CREDENTIAL_STORE=file). The child needs the same login-session
+    // variables Codex itself was started with.
+    return cursorChildEnvironment(options);
   }
 
   private resolve(): ResolvedCursorLaunch | undefined {

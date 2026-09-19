@@ -23,7 +23,7 @@ import {
 import { describeFailure, RunController } from "../src/run-controller.ts";
 import { WorkspacePolicy } from "../src/policy.ts";
 import { RunStore } from "../src/run-store.ts";
-import { CursorProvider, type CursorProbe, type CursorProbeResult } from "../src/acp/cursor.ts";
+import { cursorChildEnvironment, CursorProvider, type CursorProbe, type CursorProbeResult } from "../src/acp/cursor.ts";
 import { GrokProvider } from "../src/acp/grok.ts";
 
 class FakeTransport implements LineTransport {
@@ -225,7 +225,7 @@ class FixtureCursorProbe implements CursorProbe {
     this.fixtures = fixtures;
   }
 
-  run(executable: string, args: string[]): CursorProbeResult {
+  run(executable: string, args: string[], _env?: NodeJS.ProcessEnv): CursorProbeResult {
     this.calls.push({ executable, args });
     return this.fixtures[`${executable} ${args.join(" ")}`] ?? { status: null, error: new Error("not found") };
   }
@@ -279,14 +279,19 @@ test("Cursor auth descriptors accept methodId or id and keep the terminal type",
 test("provider environment is an auditable allowlist with an explicit inherit escape hatch", () => {
   const previousMarker = process.env.CURSOR_SESSION_MARKER;
   const previousSecret = process.env.UNRELATED_TEST_SECRET;
+  const previousStore = process.env.AGENT_CLI_CREDENTIAL_STORE;
   process.env.CURSOR_SESSION_MARKER = "cursor-scoped";
   process.env.UNRELATED_TEST_SECRET = "do-not-forward";
+  process.env.AGENT_CLI_CREDENTIAL_STORE = "file";
   try {
     const options: StartOptions = { cwd: "/project", prompt: "task", mode: "review", envMode: "session" };
     const session = providerEnvironment(options, ["CURSOR_"], ["CURSOR_API_KEY"]);
     assert.equal(session.CURSOR_SESSION_MARKER, "cursor-scoped");
     assert.equal(session.UNRELATED_TEST_SECRET, undefined);
     assert.equal(session.PATH, process.env.PATH);
+    const child = cursorChildEnvironment(options);
+    assert.equal(child.AGENT_CLI_CREDENTIAL_STORE, "file");
+    assert.equal(child.CURSOR_SESSION_MARKER, "cursor-scoped");
 
     const minimal = providerEnvironment({ ...options, envMode: "minimal" }, ["CURSOR_"]);
     assert.equal(minimal.CURSOR_SESSION_MARKER, undefined);
@@ -297,6 +302,7 @@ test("provider environment is an auditable allowlist with an explicit inherit es
   } finally {
     restore("CURSOR_SESSION_MARKER", previousMarker);
     restore("UNRELATED_TEST_SECRET", previousSecret);
+    restore("AGENT_CLI_CREDENTIAL_STORE", previousStore);
   }
 });
 
@@ -313,6 +319,7 @@ type MockOptions = {
   completeBeforePermission?: boolean;
   rejectedMethod?: string;
   rejectionMessage?: string;
+  rejectionCode?: number;
   stderrOnRejected?: string;
   loadSession?: boolean;
   driftToMode?: string;
@@ -390,7 +397,11 @@ class MockProvider extends AcpProvider {
   private handle(message: { id?: number | string; method: string; params?: Record<string, unknown> }): void {
     if (message.method === this.options.rejectedMethod) {
       if (this.options.stderrOnRejected) this.transport.emitStderr(this.options.stderrOnRejected);
-      this.transport.emit({ jsonrpc: "2.0", id: message.id, error: { code: -32001, message: this.options.rejectionMessage } });
+      this.transport.emit({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: this.options.rejectionCode ?? -32001, message: this.options.rejectionMessage },
+      });
       return;
     }
     switch (message.method) {
@@ -576,7 +587,7 @@ test("terminal-only auth methods are never sent to authenticate", async () => {
   assert.equal(provider.transport.sent("authenticate").length, 0);
 });
 
-test("authenticate -32602 is treated as unnecessary and retries session without login guidance", async () => {
+test("authenticate -32602 retries session once when that CLI already has a usable session", async () => {
   const provider = new MockProvider({
     name: "cursor",
     requireAuth: true,
@@ -592,12 +603,12 @@ test("authenticate -32602 is treated as unnecessary and retries session without 
   assert.equal(provider.transport.sent("authenticate").length, 1);
   assert.equal(provider.transport.sent("session/new").length, 2);
   const events = JSON.stringify(status.liveEvents ?? []);
-  assert.match(events, /invalid or unnecessary/);
+  assert.match(events, /retrying the session once/);
   assert.equal(/please login first|cursor-agent login/i.test(`${status.error ?? ""} ${events}`), false);
   await controller.cancel(run.id);
 });
 
-test("authenticate -32602 then a failed session retry never tells a logged-in Cursor user to login", async () => {
+test("authenticate -32602 then a still-unauthenticated session reports a failed authenticate", async () => {
   const provider = new MockProvider({
     name: "cursor",
     requireAuth: true,
@@ -613,8 +624,30 @@ test("authenticate -32602 then a failed session retry never tells a logged-in Cu
   assert.equal(status.status, "failed");
   assert.equal(provider.transport.sent("authenticate").length, 1);
   assert.equal(provider.transport.sent("session/new").length, 2);
-  assert.match(String(status.error), /could not reuse the logged-in Cursor CLI session/);
+  assert.match(String(status.error), /JSON-RPC code -32602/);
+  assert.match(String(status.error), /failed login attempt/);
+  assert.match(String(status.error), /could not use those keychain credentials/);
+  assert.equal(/could not reuse the logged-in Cursor CLI session/i.test(String(status.error)), false);
   assert.equal(/please login first|cursor-agent login/i.test(String(status.error)), false);
+});
+
+test("session/new service-init failures are not labeled as a missing Cursor login", async () => {
+  const provider = new MockProvider({
+    name: "cursor",
+    cliSessionKnownGood: true,
+    rejectedMethod: "session/new",
+    rejectionCode: -32603,
+    rejectionMessage: "Failed to initialize session services",
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "cursor", cwd: workspace, prompt: "task", mode: "plan" });
+  await settle();
+  const error = String(controller.status(run.id).error);
+  assert.equal(controller.status(run.id).status, "failed");
+  assert.match(error, /JSON-RPC code -32603/);
+  assert.match(error, /Failed to initialize session services/);
+  assert.equal(/could not reuse the logged-in Cursor CLI session/i.test(error), false);
+  assert.equal(/please login first|cursor-agent login/i.test(error), false);
 });
 
 test("Cursor CLI status is known good only when cursor-agent status reports a login", () => {
@@ -630,6 +663,26 @@ test("Cursor CLI status is known good only when cursor-agent status reports a lo
 
   const missing = new CursorProvider(new FixtureCursorProbe({}));
   assert.equal(missing.cliSessionKnownGood(), false);
+});
+
+test("Cursor status probe receives the ACP child environment", () => {
+  const previous = process.env.CURSOR_AUTH_TOKEN;
+  process.env.CURSOR_AUTH_TOKEN = "probe-token";
+  const seen: Array<NodeJS.ProcessEnv | undefined> = [];
+  try {
+    const provider = new CursorProvider({
+      run(_executable, args, env) {
+        seen.push(env);
+        if (args[0] === "status") return { status: 0, stdout: "Logged in as user@example.com\n" };
+        return { status: 0, stdout: "ok\n" };
+      },
+    });
+    assert.equal(provider.cliSessionKnownGood(), true);
+    assert.equal(seen.at(-1)?.CURSOR_AUTH_TOKEN, "probe-token");
+    assert.equal(seen.at(-1)?.PATH, process.env.PATH);
+  } finally {
+    restore("CURSOR_AUTH_TOKEN", previous);
+  }
 });
 
 test("authenticate-first providers also retry session after -32602", async () => {
@@ -667,9 +720,21 @@ test("session/new Permission denied names cwd and session-file access, not a bar
 
 test("preauthenticated Cursor failures strip please-login guidance from diagnostics", () => {
   const error = new AcpRpcError(INVALID_PARAMS_CODE, "Invalid params; please login first and run cursor-agent login");
-  const message = describeFailure("authenticate", error, "/workspace", undefined, "cursor_login:agent", undefined, true);
-  assert.match(message, /could not reuse the logged-in Cursor CLI session/);
+  const message = describeFailure("authenticate", error, "/workspace", undefined, "cursor_login:agent", undefined, {
+    stripLoginGuidance: true,
+  });
   assert.match(message, /JSON-RPC code -32602/);
+  assert.equal(/please login first|cursor-agent login/i.test(message), false);
+  assert.equal(/could not reuse the logged-in Cursor CLI session/i.test(message), false);
+});
+
+test("auth_required after session-first can still be annotated as a login-reuse failure", () => {
+  const error = new AcpRpcError(-32000, "Authentication required. Please login first and run cursor-agent login");
+  const message = describeFailure("session/new", error, "/workspace", undefined, "cursor_login:agent", undefined, {
+    stripLoginGuidance: true,
+    loginReuseFailure: true,
+  });
+  assert.match(message, /could not reuse the logged-in Cursor CLI session/);
   assert.equal(/please login first|cursor-agent login/i.test(message), false);
 });
 
