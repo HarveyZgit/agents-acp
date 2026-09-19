@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agents-acp": {
+      "command": "node",
+      "args": [
+        "--experimental-strip-types",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-server/src/index.ts"
+      ]
+    }
+  }
+}

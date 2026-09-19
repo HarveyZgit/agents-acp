@@ -67,7 +67,7 @@ const tools = [
       },
     },
   }),
-  tool("configure", "Persist default provider/model and workspace under ~/.codex/agents-acp. Call after the user answers setup questions or names defaults in a prompt. Never creates .agents-acp in a project.", {
+  tool("configure", "Persist default provider/model and workspace under the centralized runtime dir (~/.codex/agents-acp or ~/.claude/agents-acp). Call after the user answers setup questions or names defaults in a prompt. Never creates .agents-acp in a project.", {
     type: "object",
     required: ["userConfirmed"],
     properties: {
@@ -211,7 +211,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
         serverInfo: { name: "agents-acp", version: SERVER_VERSION },
-        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in ~/.codex/agents-acp; never create a project-local .agents-acp directory. Runs are confined to the configured workspace. ACP permissions stay pending until an approval-prompted, user-confirmed response tool call selects one of the provider's offered optionIds.",
+        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -449,6 +449,7 @@ function publicConfig(next: PluginConfig) {
     enablePermissionResponses: next.enablePermissionResponses,
     needsSetup: !next.workspace || !next.defaultProvider,
     writesProjectRuntimeDir: false,
+    host: next.host,
   };
 }
 

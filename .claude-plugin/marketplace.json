@@ -1,0 +1,15 @@
+{
+  "name": "agents-acp",
+  "owner": {
+    "name": "HarveyZ"
+  },
+  "plugins": [
+    {
+      "name": "agents-acp",
+      "source": "./external-acp-collaboration",
+      "description": "Dispatch scoped tasks to locally installed Cursor CLI or Grok Build ACP agents.",
+      "version": "0.2.4-pre.1",
+      "strict": true
+    }
+  ]
+}

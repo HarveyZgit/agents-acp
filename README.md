@@ -2,10 +2,10 @@
 
 Current packaged version: **0.2.4-pre.1**.
 
-`agents-acp` is a Codex plugin that delegates a scoped task to a locally
-installed ACP-capable coding agent. The adapters target Grok Build
-(`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`) and
-Cursor CLI (`cursor-agent acp`).
+`agents-acp` is a Codex and Claude Code plugin that delegates a scoped task
+to a locally installed ACP-capable coding agent. The adapters target Grok
+Build (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`)
+and Cursor CLI (`cursor-agent acp`).
 
 Cursor uses only the official `cursor-agent` binary. It never invokes `cursor`
 (the desktop launcher on many machines) and never invokes a bare `agent`,
@@ -13,7 +13,8 @@ whose name collides with other vendors' CLIs and is blocked on some machines.
 
 ## Architecture
 
-The plugin exposes the `agents-acp` local stdio MCP server to Codex. That
+The plugin exposes the `agents-acp` local stdio MCP server to Codex or
+Claude Code. That
 server starts a provider using argument arrays (never a shell command), speaks
 newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
 `started`, `text`, `activity`, `permission`, `file_change`, `error`, and
@@ -43,8 +44,9 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | `respond_question` | Answer or skip a Cursor multiple-choice question |
 | `respond_plan` | Accept or reject a Cursor plan approval |
 
-The plugin also ships two Codex skills (invoke with `$` in Codex CLI / the
-IDE extension, or `@` in ChatGPT):
+The plugin also ships two skills. In Codex CLI / the IDE extension invoke
+them with `$config` / `$dispatch` (or `@` in ChatGPT). In Claude Code they
+are `/agents-acp:config` and `/agents-acp:dispatch`.
 
 | Skill | Purpose |
 | --- | --- |
@@ -136,7 +138,9 @@ Model values are a single argv element and never concatenated into a prompt.
 
 Follow [INSTALL.md](INSTALL.md) for the exact commands. Codex launches bundled
 MCP servers itself and does not pass along your shell environment, so
-configuration comes from a config file first:
+configuration comes from a config file first. Claude Code inherits the login
+environment and still reads the same file shape from `~/.claude/agents-acp`
+(or a shared `AGENTS_ACP_HOME`).
 
 ```bash
 mkdir -p ~/.codex/agents-acp
@@ -150,10 +154,18 @@ JSON
 codex plugin marketplace add /absolute/path/to/agents-acp
 ```
 
+Claude Code:
+
+```bash
+claude plugin marketplace add /absolute/path/to/agents-acp
+claude plugin install agents-acp@agents-acp
+```
+
 Or skip the seed file: after install, invoke the plugin skill
-`$config` (or ask Codex to initialize / change the default agent
-or model). That skill calls `get_config` then `configure` and writes
-`~/.codex/agents-acp`. The plugin never creates `.agents-acp` in a project.
+`$config` / `/agents-acp:config` (or ask the host to initialize / change
+the default agent or model). That skill calls `get_config` then `configure`
+and writes the host runtime dir. The plugin never creates `.agents-acp` in
+a project.
 
 A later `$dispatch` run uses those stored defaults. `$config`
 again changes the default agent or model without starting a run.
@@ -190,8 +202,8 @@ or Grok binaries.
 
 The tests and smoke run against mocks and the bundled fake agent. They do not
 install Grok Build or Cursor CLI, authenticate either provider, or exercise
-Codex itself. Real provider and real Codex verification remain the user's
-local step.
+Codex or Claude Code themselves. Real provider and real host verification
+remain the user's local step.
 
 The bundled fake provider is registered only when it is explicitly enabled in
 config or environment; it is not available in a normal installation.

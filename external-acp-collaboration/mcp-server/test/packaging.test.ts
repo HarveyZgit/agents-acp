@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { isProjectLocalRuntimeDir, loadConfig, persistConfig } from "../src/config.ts";
+import { detectHost, isProjectLocalRuntimeDir, loadConfig, persistConfig } from "../src/config.ts";
 
 const pluginRoot = new URL("../../", import.meta.url).pathname;
 
@@ -82,14 +82,38 @@ test("plugin ships invocable $config and $dispatch skills", () => {
   assert.match(setup, /Do not start an ACP run|do not call `start`/i);
 
   const dispatch = bodies.find((body) => /^name:\s*dispatch$/m.test(body)) ?? "";
-  assert.match(dispatch, /\$config/);
+  assert.match(dispatch, /config skill|`config`|\$config/);
   assert.match(dispatch, /start/);
+  assert.match(dispatch, /Claude Code|native Codex or Claude/);
 
   const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
-  assert.match(install, /\$config/);
+  assert.match(install, /\$config|\/plugin/);
+  assert.match(install, /Claude Code/);
   assert.match(readme, /\$config/);
   assert.match(readme, /\$dispatch/);
+  assert.match(readme, /Claude Code/);
+});
+
+test("plugin ships a Claude Code manifest that launches via CLAUDE_PLUGIN_ROOT", () => {
+  const claude = JSON.parse(readFileSync(join(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
+  const codex = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
+  const mcp = JSON.parse(readFileSync(join(pluginRoot, ".mcp.claude.json"), "utf8"));
+  const marketplace = JSON.parse(readFileSync(new URL("../../../.claude-plugin/marketplace.json", import.meta.url), "utf8"));
+  assert.equal(claude.name, "agents-acp");
+  assert.equal(claude.version, codex.version);
+  assert.equal(claude.skills, "./skills/");
+  assert.equal(claude.mcpServers, "./.mcp.claude.json");
+  const server = mcp.mcpServers["agents-acp"];
+  assert.equal(server.command, "node");
+  assert.deepEqual(server.args, [
+    "--experimental-strip-types",
+    "${CLAUDE_PLUGIN_ROOT}/mcp-server/src/index.ts",
+  ]);
+  assert.equal(server.env, undefined);
+  assert.equal(marketplace.name, "agents-acp");
+  assert.equal(marketplace.plugins[0].source, "./external-acp-collaboration");
+  assert.equal(marketplace.plugins[0].strict, true);
 });
 
 test("configuration file is primary and forwarded environment variables override it", () => {
@@ -145,10 +169,23 @@ test("runtime files stay under the central dir and ignore project-local .agents-
     PLUGIN_DATA: localRuntime,
     CLAUDE_PLUGIN_DATA: localRuntime,
   });
-  assert.equal(fromPluginData.configPath, join(home, ".codex", "agents-acp", "config.json"));
-  assert.equal(fromPluginData.runtimeDir, join(home, ".codex", "agents-acp"));
+  assert.equal(detectHost({ CLAUDE_PLUGIN_DATA: localRuntime }), "claude");
+  assert.equal(fromPluginData.host, "claude");
+  assert.equal(fromPluginData.configPath, join(home, ".claude", "agents-acp", "config.json"));
+  assert.equal(fromPluginData.runtimeDir, join(home, ".claude", "agents-acp"));
   assert.equal(fromPluginData.workspace, undefined);
-  assert.equal(fromPluginData.storePath, join(home, ".codex", "agents-acp", "runs.json"));
+  assert.equal(fromPluginData.storePath, join(home, ".claude", "agents-acp", "runs.json"));
+
+  const fromCodex = loadConfig({ HOME: home });
+  assert.equal(fromCodex.host, "codex");
+  assert.equal(fromCodex.configPath, join(home, ".codex", "agents-acp", "config.json"));
+
+  const fromClaudeRoot = loadConfig({
+    HOME: home,
+    CLAUDE_PLUGIN_ROOT: join(home, "plugin-cache", "agents-acp"),
+  });
+  assert.equal(fromClaudeRoot.host, "claude");
+  assert.equal(fromClaudeRoot.runtimeDir, join(home, ".claude", "agents-acp"));
 
   const relocated = loadConfig({
     HOME: home,

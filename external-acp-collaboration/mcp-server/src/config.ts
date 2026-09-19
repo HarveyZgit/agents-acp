@@ -6,6 +6,7 @@ import { safeEffort, safeSpeed, type EffortLevel, type SpeedLevel } from "./mode
 
 export type EnvMode = "session" | "inherit" | "minimal";
 export type DefaultProviderName = "cursor" | "grok";
+export type HostKind = "claude" | "codex";
 
 export type PluginConfig = {
   workspace?: string;
@@ -25,6 +26,7 @@ export type PluginConfig = {
   runtimeDir: string;
   configPath: string;
   configLoaded: boolean;
+  host: HostKind;
 };
 
 export type ConfigureRequest = {
@@ -45,10 +47,11 @@ const CENTRAL_DIR_NAME = "agents-acp";
  * user's shell environment is present. Configuration therefore comes from a
  * stable on-disk file first; `env_vars` forwarded by Codex override it.
  *
- * Runtime files stay under ~/.codex/agents-acp (or AGENTS_ACP_HOME /
- * AGENTS_ACP_CONFIG). Project-local `.agents-acp` directories and PLUGIN_DATA
- * that would land there are ignored so the plugin never creates workspace
- * runtime files.
+ * Runtime files stay under ~/.codex/agents-acp or ~/.claude/agents-acp
+ * (or AGENTS_ACP_HOME / AGENTS_ACP_CONFIG). Claude Code is detected from
+ * CLAUDE_PLUGIN_ROOT / CLAUDE_PLUGIN_DATA. Project-local `.agents-acp`
+ * directories and PLUGIN_DATA that would land there are ignored so the
+ * plugin never creates workspace runtime files.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
@@ -92,6 +95,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
     runtimeDir,
     configPath,
     configLoaded: file.loaded,
+    host: detectHost(env),
   };
 }
 
@@ -113,8 +117,15 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string 
   return path.join(centralRuntimeDir(env), "config.json");
 }
 
+export function detectHost(env: NodeJS.ProcessEnv = process.env): HostKind {
+  return trimmed(env.CLAUDE_PLUGIN_ROOT) || trimmed(env.CLAUDE_PLUGIN_DATA)
+    ? "claude"
+    : "codex";
+}
+
 export function centralRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
-  return path.join(homedirFrom(env), ".codex", CENTRAL_DIR_NAME);
+  const homeName = detectHost(env) === "claude" ? ".claude" : ".codex";
+  return path.join(homedirFrom(env), homeName, CENTRAL_DIR_NAME);
 }
 
 export function isProjectLocalRuntimeDir(directory: string): boolean {
@@ -124,7 +135,7 @@ export function isProjectLocalRuntimeDir(directory: string): boolean {
 export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
   if (isProjectLocalRuntimeDir(path.dirname(configPath))) {
-    throw new Error("agents-acp refuses to write a project-local .agents-acp directory. Runtime files stay in ~/.codex/agents-acp.");
+    throw new Error("agents-acp refuses to write a project-local .agents-acp directory. Runtime files stay in ~/.codex/agents-acp or ~/.claude/agents-acp.");
   }
   const existing = readConfigFile(configPath);
   const next: Record<string, unknown> = persistableFields(existing);

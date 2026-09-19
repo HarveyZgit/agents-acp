@@ -1,10 +1,14 @@
-# Installing agents-acp 0.2.4-pre.1 into Codex
+# Installing agents-acp 0.2.4-pre.1
+
+The same plugin directory installs into **Codex** or **Claude Code**. Both
+hosts call the same MCP server and dispatch to local Cursor CLI / Grok Build.
 
 ## Preconditions
 
 - Node.js 22.6 or newer (`node --version`). The plugin runs dependency-free
   TypeScript with Node's `--experimental-strip-types`.
-- Codex with the documented `codex plugin marketplace` commands.
+- Codex (`codex plugin marketplace`) and/or Claude Code (`claude plugin` /
+  `/plugin`).
 - Optionally, an already installed and already authenticated Cursor CLI
   (`cursor-agent`) and/or Grok Build CLI (`grok`). Do not install or
   authenticate a provider just to use this plugin.
@@ -15,12 +19,14 @@ Codex starts bundled MCP servers itself; it does **not** hand your shell
 environment to them. Earlier versions of this document were wrong about that.
 Configuration therefore lives in a file that the server reads directly:
 
-Runtime files are **only** `~/.codex/agents-acp` (or `AGENTS_ACP_HOME` /
-`AGENTS_ACP_CONFIG`). The plugin never creates a project-local `.agents-acp`
+Runtime files are **only** `~/.codex/agents-acp` on Codex or
+`~/.claude/agents-acp` on Claude Code (or `AGENTS_ACP_HOME` /
+`AGENTS_ACP_CONFIG`). Set `AGENTS_ACP_HOME` to share one config between
+hosts. The plugin never creates a project-local `.agents-acp`
 directory. After the plugin is enabled, initialize or change defaults with
-the bundled skill — in Codex CLI / the IDE extension type `$config`
-(or ask “初始化 agents-acp” / “把默认 agent 改成 grok”). That skill calls
-`get_config` then `configure`. Prefer it over hand-editing.
+the bundled skill — in Codex type `$config`; in Claude Code type
+`/agents-acp:config` (or ask “初始化 agents-acp” / “把默认 agent 改成 grok”).
+That skill calls `get_config` then `configure`. Prefer it over hand-editing.
 
 Optional seed file if you want to set the workspace before the first chat:
 
@@ -78,6 +84,11 @@ Never put secret values in the plugin manifest; `env_vars` forwards names only.
 ```bash
 git clone https://github.com/HarveyZgit/agents-acp.git
 cd agents-acp
+```
+
+### Codex
+
+```bash
 codex plugin marketplace add "$PWD"
 codex plugin marketplace list
 ```
@@ -93,6 +104,25 @@ bundled MCP server. Keep the response tools approval-prompted, for example:
 [plugins."agents-acp".mcp_servers.agents-acp.tools.respond_permission]
 approval_mode = "approve"
 ```
+
+### Claude Code
+
+Claude Code copies the plugin into a cache, so its MCP entry uses
+`${CLAUDE_PLUGIN_ROOT}` (see `.mcp.claude.json`). It inherits the login
+environment; do not inline secrets.
+
+```bash
+claude plugin marketplace add "$PWD"
+claude plugin install agents-acp@agents-acp
+```
+
+In a Claude Code session: `/plugin marketplace add` on this repo, install
+`agents-acp`, approve the bundled MCP server, then `/reload-plugins` (or
+restart). Invoke `/agents-acp:config` then `/agents-acp:dispatch`.
+
+The repository ships `.claude-plugin/marketplace.json`, whose plugin
+`source` is `./external-acp-collaboration`. Runtime files go to
+`~/.claude/agents-acp` unless `AGENTS_ACP_HOME` is set.
 
 ## 3. Smoke test
 
@@ -131,12 +161,13 @@ requires no Codex login and no Cursor/Grok binaries.
 
 In Codex, then:
 
-1. Invoke `$config` (or ask to initialize / change the default
-   agent or model). The skill calls `get_config` with `suggestedWorkspace`
-   set to the project root. If `needsSetup` is true, it asks the returned
-   `setupQuestions` (or uses the agent/model already named) and calls
-   `configure` with `userConfirmed: true`. This writes `~/.codex/agents-acp`,
-   never a project-local `.agents-acp`.
+1. Invoke `$config` (Codex) or `/agents-acp:config` (Claude Code), or ask
+   to initialize / change the default agent or model. The skill calls
+   `get_config` with `suggestedWorkspace` set to the project root. If
+   `needsSetup` is true, it asks the returned `setupQuestions` (or uses
+   the agent/model already named) and calls `configure` with
+   `userConfirmed: true`. This writes the host runtime dir, never a
+   project-local `.agents-acp`.
 2. `list_providers` — confirm `configLoaded` is true. Prefer the stored
    `defaultProvider`. Cursor notes that `start.model` is an optional CLI pin
    for a billing pool.

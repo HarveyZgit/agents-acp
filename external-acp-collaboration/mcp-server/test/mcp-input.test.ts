@@ -119,6 +119,7 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   assert.match(unconfirmed.result.content[0].text, /userConfirmed/);
   const before = JSON.parse(preview.result.content[0].text);
   assert.equal(before.needsSetup, true);
+  assert.equal(before.host, "codex");
   assert.equal(before.runtimeDir, join(home, ".codex", "agents-acp"));
   assert.equal(before.writesProjectRuntimeDir, false);
   assert.ok(Array.isArray(before.catalogs));
