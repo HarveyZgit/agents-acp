@@ -27,6 +27,7 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
     "EXTERNAL_ACP_DEFAULT_MODEL",
     "EXTERNAL_ACP_DEFAULT_EFFORT",
     "EXTERNAL_ACP_DEFAULT_SPEED",
+    "EXTERNAL_ACP_CATALOG_FIXTURE",
     "EXTERNAL_ACP_ALLOWED_SUBTREES",
     "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
     "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
@@ -153,6 +154,12 @@ test("configuration file is primary and forwarded environment variables override
   assert.equal(missing.envMode, "session");
   assert.equal(missing.storePath, join(directory, "runs.json"));
   assert.equal(fromFile.defaultProvider, undefined);
+
+  const poisoned = loadConfig({
+    AGENTS_ACP_CONFIG: configPath,
+    EXTERNAL_ACP_DEFAULT_MODEL: "composer 2.5 high fast",
+  });
+  assert.equal(poisoned.defaultModel, undefined);
 });
 
 test("runtime files stay under the central dir and ignore project-local .agents-acp", () => {
@@ -169,12 +176,12 @@ test("runtime files stay under the central dir and ignore project-local .agents-
     PLUGIN_DATA: localRuntime,
     CLAUDE_PLUGIN_DATA: localRuntime,
   });
-  assert.equal(detectHost({ CLAUDE_PLUGIN_DATA: localRuntime }), "claude");
-  assert.equal(fromPluginData.host, "claude");
-  assert.equal(fromPluginData.configPath, join(home, ".claude", "agents-acp", "config.json"));
-  assert.equal(fromPluginData.runtimeDir, join(home, ".claude", "agents-acp"));
+  assert.equal(detectHost({ CLAUDE_PLUGIN_DATA: localRuntime }), "codex");
+  assert.equal(fromPluginData.host, "codex");
+  assert.equal(fromPluginData.configPath, join(home, ".codex", "agents-acp", "config.json"));
+  assert.equal(fromPluginData.runtimeDir, join(home, ".codex", "agents-acp"));
   assert.equal(fromPluginData.workspace, undefined);
-  assert.equal(fromPluginData.storePath, join(home, ".claude", "agents-acp", "runs.json"));
+  assert.equal(fromPluginData.storePath, join(home, ".codex", "agents-acp", "runs.json"));
 
   const fromCodex = loadConfig({ HOME: home });
   assert.equal(fromCodex.host, "codex");

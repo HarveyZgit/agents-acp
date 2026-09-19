@@ -65,6 +65,8 @@ test("resolves a keyword to a catalog base id and composes the Cursor launch id"
 
   const opus = resolveModelSelection(catalog, "opus");
   assert.equal(opus?.model, "claude-opus-4-8-thinking");
+  assert.equal(opus?.effort, undefined);
+  assert.equal(opus?.speed, undefined);
   assert.equal(opus?.model.includes("opus"), true);
 });
 
@@ -76,9 +78,8 @@ test("refuses to persist an unmatched, qualifier-only, or unresolved keyword", (
   assert.throws(() => resolveModelSelection(catalog, "fast"), /only effort\/speed/);
   assert.throws(() => resolveModelSelection(catalog, "--always-approve"), /CLI flag/);
   assert.throws(() => resolveModelSelection([], "composer 2.5"), /catalog is unavailable/);
-  const exact = resolveModelSelection([], "composer-2.5", "high", "fast");
-  assert.equal(exact?.model, "composer-2.5");
-  assert.equal(exact?.launchId, "composer-2.5-high-fast");
+  assert.throws(() => resolveModelSelection([], "composer-2.5"), /catalog is unavailable/);
+  assert.throws(() => resolveModelSelection([], "opus"), /catalog is unavailable/);
 });
 
 test("composes Cursor launch ids from stored base + effort + speed", () => {

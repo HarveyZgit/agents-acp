@@ -29,7 +29,7 @@ import {
 import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
-import type { EffortLevel, ModelCatalog, SpeedLevel } from "./models.ts";
+import { overlayCatalogFixture, type EffortLevel, type ModelCatalog, type SpeedLevel } from "./models.ts";
 
 const CLIENT_VERSION = "0.2.4-pre.1";
 const SHORT_TIMEOUT_MS = 30_000;
@@ -134,7 +134,9 @@ export class RunController {
   listModels(provider?: ProviderName): ModelCatalog[] {
     const selected = provider ? this.providers.get(provider) : undefined;
     const targets = selected ? [selected] : [...this.providers.values()].filter((item) => item.name !== "fake");
-    return targets.map((item) => item.listModels({ envMode: this.envMode, envPassthrough: this.envPassthrough }));
+    return overlayCatalogFixture(
+      targets.map((item) => item.listModels({ envMode: this.envMode, envPassthrough: this.envPassthrough })),
+    );
   }
 
   hasActiveRuns(): boolean {

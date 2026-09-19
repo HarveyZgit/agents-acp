@@ -89,7 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
       : stringArray(file.cursorEnvPassthrough),
     enableFake: booleanSetting(env.EXTERNAL_ACP_ENABLE_FAKE, file.enableFake),
     defaultProvider: providerName(trimmed(env.EXTERNAL_ACP_DEFAULT_PROVIDER) ?? file.defaultProvider),
-    defaultModel: safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel),
+    defaultModel: ignoreInvalid(() => safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel)),
     defaultEffort: ignoreInvalid(() => optionalEnum(safeEffort(trimmed(env.EXTERNAL_ACP_DEFAULT_EFFORT) ?? file.defaultEffort))),
     defaultSpeed: ignoreInvalid(() => optionalEnum(safeSpeed(trimmed(env.EXTERNAL_ACP_DEFAULT_SPEED) ?? file.defaultSpeed))),
     runtimeDir,
@@ -118,9 +118,7 @@ export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string 
 }
 
 export function detectHost(env: NodeJS.ProcessEnv = process.env): HostKind {
-  return trimmed(env.CLAUDE_PLUGIN_ROOT) || trimmed(env.CLAUDE_PLUGIN_DATA)
-    ? "claude"
-    : "codex";
+  return trimmed(env.CLAUDE_PLUGIN_ROOT) ? "claude" : "codex";
 }
 
 export function centralRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -148,9 +146,6 @@ export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv 
   if (updates.defaultModel !== undefined) {
     const model = safeStoredModel(updates.defaultModel);
     if (model) {
-      if (/\s/.test(model)) {
-        throw new Error("defaultModel must be a catalog id resolved from the agent model list, not a raw keyword.");
-      }
       next.defaultModel = model;
     } else {
       delete next.defaultModel;
@@ -250,8 +245,8 @@ function safeStoredModel(value: unknown): string | undefined {
   if (typeof value !== "string") throw new Error("defaultModel must be a string.");
   const model = value.trim();
   if (!model) return undefined;
-  if (model.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(model)) {
-    throw new Error("defaultModel must be a documented model identifier and cannot be interpreted as a CLI flag.");
+  if (model.startsWith("-") || /\s/.test(model) || !/^[A-Za-z0-9._:/\-]{1,128}$/.test(model)) {
+    throw new Error("defaultModel must be a catalog id resolved from the agent model list, not a raw keyword.");
   }
   return model;
 }

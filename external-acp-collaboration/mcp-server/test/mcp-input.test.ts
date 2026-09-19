@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+const catalogFixture = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "cursor-catalog.json");
 
 test("MCP server fails closed for absent workspace configuration and malformed tool input", async () => {
   const home = mkdtempSync(join(tmpdir(), "external-acp-mcp-home-"));
@@ -63,7 +66,12 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   const workspace = mkdtempSync(join(tmpdir(), "external-acp-setup-ws-"));
   const child = spawn(process.execPath, ["--experimental-strip-types", "src/index.ts"], {
     cwd: new URL("..", import.meta.url),
-    env: { PATH: process.env.PATH, HOME: home, EXTERNAL_ACP_ENABLE_FAKE: "1" },
+    env: {
+      PATH: process.env.PATH,
+      HOME: home,
+      EXTERNAL_ACP_ENABLE_FAKE: "1",
+      EXTERNAL_ACP_CATALOG_FIXTURE: catalogFixture,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const output: string[] = [];
@@ -92,7 +100,7 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   send(2, "configure", {
     workspace,
     defaultProvider: "cursor",
-    defaultModel: "composer-2.5",
+    defaultModel: "composer 2.5",
     defaultEffort: "high",
     defaultSpeed: "fast",
     enablePermissionResponses: true,

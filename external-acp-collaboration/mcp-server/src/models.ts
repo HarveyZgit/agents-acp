@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 export type SpeedLevel = "fast" | "standard";
 export type CatalogProvider = "cursor" | "grok";
@@ -149,15 +152,14 @@ export function resolveModelSelection(
   if (looksLikeModelId(raw)) {
     const parsed = parseCatalogId(raw);
     const hit = catalog.find((model) => model.id === raw || model.base === raw);
-    if (hit || catalog.length === 0) {
-      const base = hit?.base ?? parsed.base;
+    if (hit) {
       return {
-        model: base,
+        model: hit.base,
         effort: resolvedEffort ?? parsed.effort,
         speed: resolvedSpeed ?? parsed.speed,
         launchId: provider === "cursor"
-          ? composeCursorLaunchId(base, resolvedEffort ?? parsed.effort, resolvedSpeed ?? parsed.speed, catalog)
-          : base,
+          ? composeCursorLaunchId(hit.base, resolvedEffort ?? parsed.effort, resolvedSpeed ?? parsed.speed, catalog)
+          : hit.base,
       };
     }
   }
@@ -179,10 +181,10 @@ export function resolveModelSelection(
   }
   return {
     model: preferred.base,
-    effort: resolvedEffort ?? preferred.effort,
-    speed: resolvedSpeed ?? preferred.speed,
+    effort: resolvedEffort,
+    speed: resolvedSpeed,
     launchId: provider === "cursor"
-      ? composeCursorLaunchId(preferred.base, resolvedEffort ?? preferred.effort, resolvedSpeed ?? preferred.speed, catalog)
+      ? composeCursorLaunchId(preferred.base, resolvedEffort, resolvedSpeed, catalog)
       : preferred.base,
   };
 }
@@ -268,4 +270,38 @@ function normalize(value: string): string {
 
 function stripAnsi(value: string): string {
   return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+/**
+ * Test/dev overlay so MCP flows can resolve keywords without cursor-agent
+ * or grok login. EXTERNAL_ACP_CATALOG_FIXTURE is an absolute JSON path:
+ * { "cursor": [{ "id": "composer-2.5", "label": "Composer 2.5" }] }
+ */
+export function overlayCatalogFixture(
+  catalogs: ModelCatalog[],
+  env: NodeJS.ProcessEnv = process.env,
+): ModelCatalog[] {
+  const fixturePath = env.EXTERNAL_ACP_CATALOG_FIXTURE?.trim();
+  if (!fixturePath) return catalogs;
+  const resolved = path.resolve(fixturePath);
+  if (!path.isAbsolute(fixturePath) || fixturePath.includes("\0")) {
+    throw new Error("EXTERNAL_ACP_CATALOG_FIXTURE must be an absolute filesystem path.");
+  }
+  const parsed = JSON.parse(readFileSync(resolved, "utf8")) as Record<string, unknown>;
+  return catalogs.map((catalog) => {
+    const rows = parsed[catalog.provider];
+    if (!Array.isArray(rows)) return catalog;
+    const models = rows.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const entry = row as { id?: unknown; label?: unknown };
+      if (typeof entry.id !== "string" || !looksLikeModelId(entry.id)) return [];
+      return [parseCatalogId(entry.id, typeof entry.label === "string" ? entry.label : entry.id)];
+    });
+    return {
+      ...catalog,
+      available: models.length > 0,
+      models,
+      error: models.length > 0 ? undefined : catalog.error,
+    };
+  });
 }
