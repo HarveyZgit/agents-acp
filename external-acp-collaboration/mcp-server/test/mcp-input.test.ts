@@ -128,7 +128,7 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   assert.equal(after.workspace, workspace);
   assert.equal(existsSync(join(workspace, ".agents-acp")), false);
   assert.ok(fakeStart);
-  assert.equal(fakeStart.result.isError, false, fakeStart.result.content[0].text);
+  assert.ok(!fakeStart.result.isError, fakeStart.result.content[0].text);
   assert.ok(defaultStart);
   assert.equal(/No default provider/i.test(defaultStart.result.content[0].text), false);
 });
