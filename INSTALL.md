@@ -17,7 +17,10 @@ Configuration therefore lives in a file that the server reads directly:
 
 Runtime files are **only** `~/.codex/agents-acp` (or `AGENTS_ACP_HOME` /
 `AGENTS_ACP_CONFIG`). The plugin never creates a project-local `.agents-acp`
-directory. Prefer `get_config` + `configure` in Codex over hand-editing.
+directory. After the plugin is enabled, initialize or change defaults with
+the bundled skill — in Codex CLI / the IDE extension type `$agents-acp-setup`
+(or ask “初始化 agents-acp” / “把默认 agent 改成 grok”). That skill calls
+`get_config` then `configure`. Prefer it over hand-editing.
 
 Optional seed file if you want to set the workspace before the first chat:
 
@@ -123,13 +126,14 @@ cancellation, survival of a stale run-store lock, the blocked `implement` gate,
 and termination of provider process groups when the transport closes. It
 requires no Codex login and no Cursor/Grok binaries.
 
-In Codex, then call:
+In Codex, then:
 
-1. `get_config` with `suggestedWorkspace` set to the project root. If
-   `needsSetup` is true, ask the user the returned `setupQuestions` (or use
-   the agent/model they already named) and call `configure` with
-   `userConfirmed: true`. This writes `~/.codex/agents-acp`, never a
-   project-local `.agents-acp`.
+1. Invoke `$agents-acp-setup` (or ask to initialize / change the default
+   agent or model). The skill calls `get_config` with `suggestedWorkspace`
+   set to the project root. If `needsSetup` is true, it asks the returned
+   `setupQuestions` (or uses the agent/model already named) and calls
+   `configure` with `userConfirmed: true`. This writes `~/.codex/agents-acp`,
+   never a project-local `.agents-acp`.
 2. `list_providers` — confirm `configLoaded` is true. Prefer the stored
    `defaultProvider`. Cursor notes that `start.model` is an optional CLI pin
    for a billing pool.

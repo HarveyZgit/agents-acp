@@ -43,6 +43,14 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | `respond_question` | Answer or skip a Cursor multiple-choice question |
 | `respond_plan` | Accept or reject a Cursor plan approval |
 
+The plugin also ships two Codex skills (invoke with `$` in Codex CLI / the
+IDE extension, or `@` in ChatGPT):
+
+| Skill | Purpose |
+| --- | --- |
+| `$agents-acp-setup` | First-time init or later change of default agent / model / workspace |
+| `$agents-acp` | Delegate a scoped ACP run. Calls setup first when `needsSetup` |
+
 ### Protocol behavior
 
 - Authentication follows ACP: after `initialize`, `session/new` is attempted
@@ -140,9 +148,13 @@ JSON
 codex plugin marketplace add /absolute/path/to/agents-acp
 ```
 
-Or skip the seed file: after install, call `get_config` and `configure` so
-defaults are written under `~/.codex/agents-acp`. The plugin never creates
-`.agents-acp` in a project.
+Or skip the seed file: after install, invoke the plugin skill
+`$agents-acp-setup` (or ask Codex to initialize / change the default agent
+or model). That skill calls `get_config` then `configure` and writes
+`~/.codex/agents-acp`. The plugin never creates `.agents-acp` in a project.
+
+A later `$agents-acp` run uses those stored defaults. `$agents-acp-setup`
+again changes the default agent or model without starting a run.
 
 Any `EXTERNAL_ACP_*` variable listed in the plugin's `.mcp.json` `env_vars`
 overrides the corresponding config file value when Codex forwards it.

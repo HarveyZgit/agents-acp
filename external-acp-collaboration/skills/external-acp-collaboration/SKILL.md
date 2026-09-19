@@ -1,15 +1,17 @@
 ---
 name: agents-acp
-description: Delegate a clearly scoped coding task to a locally installed Cursor CLI or Grok Build ACP agent.
+description: Delegate a scoped coding task to a locally installed Cursor CLI or Grok Build ACP agent. If the user only wants to initialize or change the default agent/model, use the agents-acp-setup skill instead of starting a run.
 ---
 
 Use this skill when the user explicitly asks for an independent external-agent pass, names Cursor CLI or Grok Build, or benefits from a second opinion. Do not present the run as a native Codex subagent.
+
+If this turn is only setup or a settings change (initialize, configure, change default agent/model), follow `$agents-acp-setup` and stop after `configure`. Do not call `start`.
 
 Runtime files stay in `~/.codex/agents-acp`. Never create or write `.agents-acp` in the project.
 
 1. Call `get_config` with `suggestedWorkspace` set to the current project root.
 2. If `needsSetup` is true, do **not** guess a provider. Ask the user with the returned `setupQuestions`, or apply values they already named in the prompt (`cursor` / `grok`, optional model). Then call `configure` with `userConfirmed: true`.
-3. If the user later says to change the default agent or model, ask or use the named values, then call `configure` again.
+3. If the user later says to change the default agent or model, follow `$agents-acp-setup` (ask or use the named values, then `configure`).
 4. Call `list_providers` and report unavailable local executables clearly. Prefer the stored `defaultProvider` / `defaultModel`. A start may omit `provider` and `model` after configure. Pass `provider` or `model` only to override for that run.
 
 Cursor uses `cursor-agent acp` only; it never falls back to `cursor` or `agent`. Official ACP has no universal model field; the CLI still accepts `cursor-agent --model <id> acp`.

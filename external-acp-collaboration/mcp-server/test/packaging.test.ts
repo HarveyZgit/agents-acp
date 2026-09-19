@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,6 +55,32 @@ test("plugin and MCP manifests agree on the agents-acp identity and version", ()
   assert.equal(server.version, plugin.version);
   assert.match(install, new RegExp(`agents-acp-${plugin.version}\\.tar\\.gz`));
   assert.match(readme, new RegExp(plugin.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("plugin ships an invocable setup skill that uses get_config and configure", () => {
+  const plugin = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
+  assert.equal(plugin.skills, "./skills/");
+  const skillsRoot = join(pluginRoot, "skills");
+  const skillFiles = readdirSync(skillsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(skillsRoot, entry.name, "SKILL.md"));
+  const bodies = skillFiles.map((file) => readFileSync(file, "utf8"));
+  const names = bodies.flatMap((body) => {
+    const match = /^name:\s*(\S+)/m.exec(body);
+    return match ? [match[1]] : [];
+  });
+  assert.deepEqual(new Set(names), new Set(["agents-acp", "agents-acp-setup"]));
+
+  const setup = bodies.find((body) => /^name:\s*agents-acp-setup/m.test(body)) ?? "";
+  assert.match(setup, /get_config/);
+  assert.match(setup, /configure/);
+  assert.match(setup, /userConfirmed/);
+  assert.match(setup, /Do not start an ACP run|do not call `start`/i);
+
+  const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
+  assert.match(install, /\$agents-acp-setup/);
+  assert.match(readme, /\$agents-acp-setup/);
 });
 
 test("configuration file is primary and forwarded environment variables override it", () => {
