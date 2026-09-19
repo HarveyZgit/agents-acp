@@ -15,6 +15,12 @@ Codex starts bundled MCP servers itself; it does **not** hand your shell
 environment to them. Earlier versions of this document were wrong about that.
 Configuration therefore lives in a file that the server reads directly:
 
+Runtime files are **only** `~/.codex/agents-acp` (or `AGENTS_ACP_HOME` /
+`AGENTS_ACP_CONFIG`). The plugin never creates a project-local `.agents-acp`
+directory. Prefer `get_config` + `configure` in Codex over hand-editing.
+
+Optional seed file if you want to set the workspace before the first chat:
+
 ```bash
 mkdir -p ~/.codex/agents-acp
 cat > ~/.codex/agents-acp/config.json <<'JSON'
@@ -25,7 +31,8 @@ cat > ~/.codex/agents-acp/config.json <<'JSON'
   "allowUnsandboxedImplement": false,
   "maxRunMs": 7200000,
   "idleTimeoutMs": 900000,
-  "envMode": "session"
+  "envMode": "session",
+  "defaultProvider": "cursor"
 }
 JSON
 chmod 600 ~/.codex/agents-acp/config.json
@@ -35,19 +42,22 @@ Fields:
 
 | Field | Meaning |
 | --- | --- |
-| `workspace` | Required. The only root in which providers may be started. |
+| `workspace` | Required before `start`. The only root in which providers may be started. |
+| `defaultProvider` | `cursor` or `grok`. Set by `configure` or named in a user prompt. |
+| `defaultModel` | Optional CLI model pin. Omit or clear to use the provider CLI default. |
 | `allowedSubtrees` | Extra launch directories, each inside `workspace`. |
 | `enablePermissionResponses` | Enables `respond_permission` / `respond_question` / `respond_plan`. |
 | `allowUnsandboxedImplement` | Required for `implement`; provider writes are not OS-sandboxed. |
 | `maxRunMs` | Hard run budget (1 minute to 24 hours). |
 | `idleTimeoutMs` | Aborts a silent provider; paused while a decision is pending. |
 | `envMode` | `session` (auditable allowlist, default), `inherit`, or `minimal`. |
-| `storePath` | Optional run-store location. Give each Codex profile/session its own path to avoid machine-wide lock contention, for example `~/.codex/agents-acp/runs-<project>.json`. |
+| `storePath` | Optional run-store location. Relative paths resolve under the central runtime dir, never the project. Example: `~/.codex/agents-acp/runs-<project>.json`. |
 | `enableFake` | Registers the bundled fake ACP agent. Leave unset in production. |
 
 The plugin's `.mcp.json` also declares `env_vars`, so Codex forwards these when
 they exist in its own environment, and they override the config file:
-`AGENTS_ACP_CONFIG`, `EXTERNAL_ACP_WORKSPACE`, `EXTERNAL_ACP_ALLOWED_SUBTREES`,
+`AGENTS_ACP_CONFIG`, `AGENTS_ACP_HOME`, `EXTERNAL_ACP_WORKSPACE`, `EXTERNAL_ACP_DEFAULT_PROVIDER`,
+`EXTERNAL_ACP_DEFAULT_MODEL`, `EXTERNAL_ACP_ALLOWED_SUBTREES`,
 `EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT`,
 `EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES`, `EXTERNAL_ACP_MAX_RUN_MS`,
 `EXTERNAL_ACP_IDLE_TIMEOUT_MS`, `EXTERNAL_ACP_STORE_PATH`,
@@ -115,14 +125,19 @@ requires no Codex login and no Cursor/Grok binaries.
 
 In Codex, then call:
 
-1. `list_providers` — confirm `configLoaded` is true. Prefer Grok when it is
-   available. Cursor notes that `start.model` is an optional CLI pin for a
-   billing pool.
-2. `start` with `provider: "grok"`, `mode: "review"`, and a harmless prompt.
-   Omit `model` unless you need a specific Grok model. `cwd` must be inside
-   `workspace`. For Cursor quota pinning, pass `provider: "cursor"` and
-   `model: "composer-2.5"` (or omit `model` to use the CLI `selectedModel`).
-3. `status` while it runs, then `result` when it finishes.
+1. `get_config` with `suggestedWorkspace` set to the project root. If
+   `needsSetup` is true, ask the user the returned `setupQuestions` (or use
+   the agent/model they already named) and call `configure` with
+   `userConfirmed: true`. This writes `~/.codex/agents-acp`, never a
+   project-local `.agents-acp`.
+2. `list_providers` — confirm `configLoaded` is true. Prefer the stored
+   `defaultProvider`. Cursor notes that `start.model` is an optional CLI pin
+   for a billing pool.
+3. `start` with `mode: "review"` and a harmless prompt. After configure,
+   `provider` and `model` may be omitted. `cwd` must be inside `workspace`.
+   To override one run, pass `provider: "cursor"` and/or
+   `model: "composer-2.5"`.
+4. `status` while it runs, then `result` when it finishes.
 
 If a permission appears, `status` lists its `requestId` and the provider's
 offered `options`. Choose one yourself and call `respond_permission` with that

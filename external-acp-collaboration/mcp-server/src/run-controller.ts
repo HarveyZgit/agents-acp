@@ -100,7 +100,7 @@ const ACCEPTABLE_MODES: Record<TaskMode, string[]> = {
 
 export class RunController {
   private readonly store: RunStore;
-  private readonly policy: WorkspacePolicy;
+  private policy: WorkspacePolicy;
   private readonly providers: Map<ProviderName, AcpProvider>;
   private readonly maxRunMs: number;
   private readonly idleTimeoutMs: number;
@@ -126,6 +126,17 @@ export class RunController {
 
   listProviders(): ReturnType<AcpProvider["discover"]>[] {
     return [...this.providers.values()].map((provider) => provider.discover());
+  }
+
+  hasActiveRuns(): boolean {
+    return [...this.runtime.values()].some((runtime) => !isTerminal(runtime.status));
+  }
+
+  replacePolicy(policy: WorkspacePolicy): void {
+    if (this.hasActiveRuns()) {
+      throw new Error("Cannot change the workspace while an ACP run is still active.");
+    }
+    this.policy = policy;
   }
 
   start(request: StartRequest): RunRecord {

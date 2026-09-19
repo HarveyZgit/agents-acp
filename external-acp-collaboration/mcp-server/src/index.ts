@@ -1,5 +1,5 @@
 import readline from "node:readline";
-import { loadConfig } from "./config.ts";
+import { loadConfig, persistConfig, type PluginConfig } from "./config.ts";
 import { RunController } from "./run-controller.ts";
 import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
@@ -7,22 +7,9 @@ import { renderRunPanel } from "../../ui/run-panel/run-panel.ts";
 
 const SERVER_VERSION = "0.2.4-pre.1";
 
-const config = loadConfig();
+let config = loadConfig();
 const store = new RunStore(config.storePath);
-const configurationError = config.workspace
-  ? undefined
-  : `No workspace is configured. Set "workspace" in ${config.configPath} or forward EXTERNAL_ACP_WORKSPACE through the plugin's .mcp.json env_vars.`;
-const controller = new RunController(
-  store,
-  new WorkspacePolicy(config.workspace ?? process.cwd(), config.workspace ? config.allowedSubtrees : [], config.allowUnsandboxedImplement),
-  {
-    enableFake: config.enableFake,
-    maxRunMs: config.maxRunMs,
-    idleTimeoutMs: config.idleTimeoutMs,
-    envMode: config.envMode,
-    envPassthrough: config.cursorEnvPassthrough,
-  },
-);
+let controller = createController(config, store);
 let initialized = false;
 let shuttingDown = false;
 
@@ -62,9 +49,35 @@ const tools = [
     type: "object",
     properties: {},
   }),
-  tool("start", "Start an ACP run. Implement mode requires allowImplement: true and is serialized per workspace.", {
+  tool("get_config", "Return centralized runtime paths, defaults, and setup questions. Does not write project-local files.", {
     type: "object",
-    required: ["provider", "cwd", "prompt", "mode"],
+    properties: {
+      suggestedWorkspace: {
+        type: "string",
+        description: "Current project root to offer as the workspace default during setup.",
+      },
+    },
+  }),
+  tool("configure", "Persist default provider/model and workspace under ~/.codex/agents-acp. Call after the user answers setup questions or names defaults in a prompt. Never creates .agents-acp in a project.", {
+    type: "object",
+    required: ["userConfirmed"],
+    properties: {
+      workspace: { type: "string", description: "Absolute workspace root." },
+      defaultProvider: { type: "string", enum: ["cursor", "grok"] },
+      defaultModel: {
+        type: "string",
+        description: "Optional CLI model pin. Empty string clears the stored default.",
+      },
+      enablePermissionResponses: { type: "boolean" },
+      userConfirmed: {
+        type: "boolean",
+        description: "Must be true after the user chose these defaults or named them in a prompt.",
+      },
+    },
+  }),
+  tool("start", "Start an ACP run. Provider/model may be omitted when configure stored defaults. Implement mode requires allowImplement: true and is serialized per workspace.", {
+    type: "object",
+    required: ["cwd", "prompt", "mode"],
     properties: {
       provider: { type: "string", enum: ["cursor", "grok", "fake"] },
       cwd: { type: "string" },
@@ -73,7 +86,7 @@ const tools = [
       allowImplement: { type: "boolean" },
       model: {
         type: "string",
-        description: "Optional. Omit to use the provider CLI default. Prefer grok without a model unless the user asks. For Cursor, pass a model only to pin a billing pool (for example composer-2.5).",
+        description: "Optional. Omit to use the configured default, then the provider CLI default.",
       },
     },
   }),
@@ -169,7 +182,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
         serverInfo: { name: "agents-acp", version: SERVER_VERSION },
-        instructions: "Runs are confined to the configured workspace. ACP permissions stay pending until an approval-prompted, user-confirmed response tool call selects one of the provider's offered optionIds.",
+        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in ~/.codex/agents-acp; never create a project-local .agents-acp directory. Runs are confined to the configured workspace. ACP permissions stay pending until an approval-prompted, user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -212,18 +225,30 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
     switch (name) {
       case "list_providers":
         onlyKeys(args, []);
-        result = { providers: controller.listProviders(), configPath: config.configPath, configLoaded: config.configLoaded };
+        result = {
+          providers: controller.listProviders(),
+          ...publicConfig(config),
+        };
+        break;
+      case "get_config":
+        onlyKeys(args, ["suggestedWorkspace"]);
+        result = configSnapshot(optionalString(args.suggestedWorkspace, "suggestedWorkspace", 4_096));
+        break;
+      case "configure":
+        onlyKeys(args, ["workspace", "defaultProvider", "defaultModel", "enablePermissionResponses", "userConfirmed"]);
+        if (args.userConfirmed !== true) throw new Error("configure requires explicit userConfirmed: true after the user chose or named these defaults.");
+        result = applyConfigure(args);
         break;
       case "start":
         onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
         requireWorkspaceConfiguration();
         result = controller.start({
-          provider: stringEnum(args.provider, ["cursor", "grok", "fake"]),
+          provider: resolveStartProvider(args.provider),
           cwd: requiredString(args.cwd, "cwd", 4_096, true),
           prompt: requiredString(args.prompt, "prompt", 65_536),
           mode: stringEnum(args.mode, ["review", "plan", "implement"]),
           allowImplement: args.allowImplement === true,
-          model: optionalString(args.model, "model", 256),
+          model: resolveStartModel(args.provider, args.model),
         });
         break;
       case "status":
@@ -357,8 +382,125 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[]): void {
   if (unexpected.length > 0) throw new Error(`Unexpected tool argument: ${unexpected[0]}`);
 }
 
+function createController(next: PluginConfig, runStore: RunStore): RunController {
+  return new RunController(
+    runStore,
+    createPolicy(next),
+    {
+      enableFake: next.enableFake,
+      maxRunMs: next.maxRunMs,
+      idleTimeoutMs: next.idleTimeoutMs,
+      envMode: next.envMode,
+      envPassthrough: next.cursorEnvPassthrough,
+    },
+  );
+}
+
+function createPolicy(next: PluginConfig): WorkspacePolicy {
+  return new WorkspacePolicy(
+    next.workspace ?? process.cwd(),
+    next.workspace ? next.allowedSubtrees : [],
+    next.allowUnsandboxedImplement,
+  );
+}
+
+function publicConfig(next: PluginConfig) {
+  return {
+    runtimeDir: next.runtimeDir,
+    configPath: next.configPath,
+    configLoaded: next.configLoaded,
+    workspace: next.workspace,
+    defaultProvider: next.defaultProvider,
+    defaultModel: next.defaultModel,
+    enablePermissionResponses: next.enablePermissionResponses,
+    needsSetup: !next.workspace || !next.defaultProvider,
+    writesProjectRuntimeDir: false,
+  };
+}
+
+function configSnapshot(suggestedWorkspace?: string) {
+  const providers = controller.listProviders().map((provider) => ({
+    provider: provider.provider,
+    available: provider.available,
+    version: provider.version,
+    note: provider.note,
+  }));
+  const snapshot = publicConfig(config);
+  return {
+    ...snapshot,
+    providers,
+    setupQuestions: snapshot.needsSetup
+      ? [
+        {
+          id: "defaultProvider",
+          prompt: "Which ACP agent should be the default?",
+          options: [
+            { id: "cursor", label: "Cursor CLI (cursor-agent)" },
+            { id: "grok", label: "Grok Build (grok)" },
+          ],
+        },
+        {
+          id: "defaultModel",
+          prompt: "Optional default model. Leave unset to use the CLI default / selectedModel.",
+          optional: true,
+        },
+        {
+          id: "workspace",
+          prompt: "Absolute workspace root the provider may run in.",
+          suggested: suggestedWorkspace,
+          optional: Boolean(config.workspace),
+        },
+      ]
+      : [],
+  };
+}
+
+function applyConfigure(args: Record<string, unknown>) {
+  const previousWorkspace = config.workspace;
+  const next = persistConfig({
+    workspace: optionalString(args.workspace, "workspace", 4_096),
+    defaultProvider: args.defaultProvider === undefined
+      ? undefined
+      : stringEnum(args.defaultProvider, ["cursor", "grok"]),
+    defaultModel: args.defaultModel === undefined
+      ? undefined
+      : args.defaultModel === "" || args.defaultModel === null
+        ? null
+        : requiredString(args.defaultModel, "defaultModel", 256),
+    enablePermissionResponses: args.enablePermissionResponses === undefined
+      ? undefined
+      : args.enablePermissionResponses === true,
+  });
+  if (next.workspace !== previousWorkspace || next.allowUnsandboxedImplement !== config.allowUnsandboxedImplement) {
+    controller.replacePolicy(createPolicy(next));
+  }
+  config = next;
+  return configSnapshot();
+}
+
+function resolveStartProvider(value: unknown): "cursor" | "grok" | "fake" {
+  if (value !== undefined) {
+    const provider = stringEnum(value, ["cursor", "grok", "fake"]);
+    if (provider === "fake" && !config.enableFake) throw new Error("The fake provider is disabled.");
+    return provider;
+  }
+  if (config.defaultProvider) return config.defaultProvider;
+  throw new Error(`No default provider is configured. Ask the user, then call configure, or pass provider on start. Settings live in ${config.configPath}.`);
+}
+
+function resolveStartModel(providerValue: unknown, modelValue: unknown): string | undefined {
+  const explicit = optionalString(modelValue, "model", 256);
+  if (explicit !== undefined) return explicit;
+  const provider = providerValue === undefined
+    ? config.defaultProvider
+    : stringEnum(providerValue, ["cursor", "grok", "fake"]);
+  return provider === config.defaultProvider ? config.defaultModel : undefined;
+}
+
 function requireWorkspaceConfiguration(): void {
-  if (configurationError) throw new Error(configurationError);
+  if (!config.workspace) {
+    throw new Error(`No workspace is configured. Call get_config, then configure, or set "workspace" in ${config.configPath}.`);
+  }
 }
 
 function requirePermissionResponses(userConfirmed: unknown): void {

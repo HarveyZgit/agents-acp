@@ -31,8 +31,10 @@ streamed text to disk; streamed text stays in memory while the server runs.
 
 | Tool | Purpose |
 | --- | --- |
-| `list_providers` | Discovered providers, resolved ACP command, and config path |
-| `start` | Start a `review`, `plan`, or `implement` run |
+| `list_providers` | Discovered providers, resolved ACP command, centralized config path, and defaults |
+| `get_config` | Runtime dir, defaults, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
+| `configure` | Persist default provider/model and workspace under `~/.codex/agents-acp` after the user answers or names them |
+| `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model` may be omitted after configure |
 | `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |
 | `result` | Final text, `stopReason`, changed files, verification advice |
 | `cancel` | ACP cancel notification plus process-group termination |
@@ -114,11 +116,10 @@ streamed text to disk; streamed text stays in memory while the server runs.
   stale and corrupt state is reclaimed, and a persistence failure marks the run
   `storeDegraded` rather than taking down the MCP server.
 
-Default `start` guidance is `provider: "grok"` with **no** `model`; Grok then
-uses its CLI default. Pass `model` only when the user names one. Cursor also
-accepts optional startup `--model` (`cursor-agent --model <id> acp`) so a
-billing pool can be pinned after a usage cap (for example `composer-2.5`).
-Omitting Cursor `model` uses the CLI `selectedModel`. Model values are
+After `configure`, `start` may omit `provider` and `model` and uses the stored
+defaults. Pass either field only to override that run. Cursor accepts optional
+startup `--model` (`cursor-agent --model <id> acp`) so a billing pool can be
+pinned after a usage cap (for example `composer-2.5`). Model values are
 validated as a single argv element and never concatenated into a prompt.
 
 ## Installation
@@ -132,11 +133,16 @@ mkdir -p ~/.codex/agents-acp
 cat > ~/.codex/agents-acp/config.json <<'JSON'
 {
   "workspace": "/absolute/path/to/project",
-  "enablePermissionResponses": true
+  "enablePermissionResponses": true,
+  "defaultProvider": "cursor"
 }
 JSON
 codex plugin marketplace add /absolute/path/to/agents-acp
 ```
+
+Or skip the seed file: after install, call `get_config` and `configure` so
+defaults are written under `~/.codex/agents-acp`. The plugin never creates
+`.agents-acp` in a project.
 
 Any `EXTERNAL_ACP_*` variable listed in the plugin's `.mcp.json` `env_vars`
 overrides the corresponding config file value when Codex forwards it.

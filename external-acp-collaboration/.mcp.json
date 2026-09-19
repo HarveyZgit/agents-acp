@@ -11,6 +11,9 @@
       "tool_timeout_sec": 120,
       "env_vars": [
         "AGENTS_ACP_CONFIG",
+        "AGENTS_ACP_HOME",
+        "EXTERNAL_ACP_DEFAULT_PROVIDER",
+        "EXTERNAL_ACP_DEFAULT_MODEL",
         "EXTERNAL_ACP_WORKSPACE",
         "EXTERNAL_ACP_ALLOWED_SUBTREES",
         "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",

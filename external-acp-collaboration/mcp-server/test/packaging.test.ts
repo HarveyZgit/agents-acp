@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadConfig } from "../src/config.ts";
+import { isProjectLocalRuntimeDir, loadConfig, persistConfig } from "../src/config.ts";
 
 const pluginRoot = new URL("../../", import.meta.url).pathname;
 
@@ -21,7 +21,10 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
 
   for (const name of [
     "AGENTS_ACP_CONFIG",
+    "AGENTS_ACP_HOME",
     "EXTERNAL_ACP_WORKSPACE",
+    "EXTERNAL_ACP_DEFAULT_PROVIDER",
+    "EXTERNAL_ACP_DEFAULT_MODEL",
     "EXTERNAL_ACP_ALLOWED_SUBTREES",
     "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
     "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
@@ -89,4 +92,66 @@ test("configuration file is primary and forwarded environment variables override
   assert.equal(missing.configLoaded, false);
   assert.equal(missing.workspace, undefined);
   assert.equal(missing.envMode, "session");
+  assert.equal(missing.storePath, join(directory, "runs.json"));
+  assert.equal(fromFile.defaultProvider, undefined);
+});
+
+test("runtime files stay under the central dir and ignore project-local .agents-acp", () => {
+  const home = mkdtempSync(join(tmpdir(), "agents-acp-home-"));
+  const project = mkdtempSync(join(tmpdir(), "agents-acp-project-"));
+  const localRuntime = join(project, ".agents-acp");
+  mkdirSync(localRuntime, { recursive: true });
+  writeFileSync(join(localRuntime, "config.json"), JSON.stringify({ workspace: "/should-not-load" }));
+
+  assert.equal(isProjectLocalRuntimeDir(localRuntime), true);
+
+  const fromPluginData = loadConfig({
+    HOME: home,
+    PLUGIN_DATA: localRuntime,
+    CLAUDE_PLUGIN_DATA: localRuntime,
+  });
+  assert.equal(fromPluginData.configPath, join(home, ".codex", "agents-acp", "config.json"));
+  assert.equal(fromPluginData.runtimeDir, join(home, ".codex", "agents-acp"));
+  assert.equal(fromPluginData.workspace, undefined);
+  assert.equal(fromPluginData.storePath, join(home, ".codex", "agents-acp", "runs.json"));
+
+  const relocated = loadConfig({
+    HOME: home,
+    AGENTS_ACP_HOME: localRuntime,
+    AGENTS_ACP_CONFIG: join(localRuntime, "config.json"),
+  });
+  assert.equal(relocated.configPath, join(home, ".codex", "agents-acp", "config.json"));
+  assert.equal(existsSync(join(project, ".agents-acp", "runs.json")), false);
+});
+
+test("configure persists defaults centrally and never writes the project", () => {
+  const home = mkdtempSync(join(tmpdir(), "agents-acp-cfghome-"));
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-cfgws-"));
+  const env = { HOME: home };
+  const saved = persistConfig({
+    workspace,
+    defaultProvider: "cursor",
+    defaultModel: "composer-2.5",
+    enablePermissionResponses: true,
+  }, env);
+  assert.equal(saved.workspace, workspace);
+  assert.equal(saved.defaultProvider, "cursor");
+  assert.equal(saved.defaultModel, "composer-2.5");
+  assert.equal(saved.configPath, join(home, ".codex", "agents-acp", "config.json"));
+  const written = JSON.parse(readFileSync(saved.configPath, "utf8"));
+  assert.equal(written.defaultProvider, "cursor");
+  assert.equal(written.defaultModel, "composer-2.5");
+  assert.equal(existsSync(join(workspace, ".agents-acp")), false);
+
+  const cleared = persistConfig({ defaultModel: "" }, env);
+  assert.equal(cleared.defaultModel, undefined);
+  assert.equal("defaultModel" in JSON.parse(readFileSync(saved.configPath, "utf8")), false);
+
+  const projectRuntime = join(workspace, ".agents-acp");
+  const relocated = persistConfig({
+    defaultProvider: "grok",
+  }, { HOME: home, AGENTS_ACP_HOME: projectRuntime });
+  assert.equal(relocated.configPath, join(home, ".codex", "agents-acp", "config.json"));
+  assert.equal(relocated.defaultProvider, "grok");
+  assert.equal(existsSync(projectRuntime), false);
 });

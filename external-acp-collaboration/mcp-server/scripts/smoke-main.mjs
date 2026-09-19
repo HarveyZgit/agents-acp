@@ -73,9 +73,14 @@ try {
   await request("initialize", {});
   const tools = await request("tools/list", {});
   const toolNames = tools.tools.map((tool) => tool.name);
-  for (const expected of ["list_providers", "start", "status", "cancel", "resume", "result", "respond_permission"]) {
+  for (const expected of ["list_providers", "get_config", "configure", "start", "status", "cancel", "resume", "result", "respond_permission"]) {
     assert.ok(toolNames.includes(expected), `missing tool ${expected}`);
   }
+
+  const snapshot = await call("get_config", { suggestedWorkspace: workspace });
+  assert.equal(snapshot.runtimeDir, join(dataHome, ".codex", "agents-acp"));
+  assert.equal(snapshot.writesProjectRuntimeDir, false);
+  assert.equal(snapshot.workspace, workspace);
 
   const discovery = await call("list_providers", {});
   assert.equal(discovery.configLoaded, true);
