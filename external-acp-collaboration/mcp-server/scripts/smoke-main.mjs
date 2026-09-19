@@ -78,7 +78,8 @@ try {
   }
 
   const snapshot = await call("get_config", { suggestedWorkspace: workspace });
-  assert.equal(snapshot.runtimeDir, join(dataHome, ".codex", "agents-acp"));
+  assert.equal(snapshot.runtimeDir, dataHome);
+  assert.equal(snapshot.configPath, configPath);
   assert.equal(snapshot.writesProjectRuntimeDir, false);
   assert.equal(snapshot.workspace, workspace);
 
