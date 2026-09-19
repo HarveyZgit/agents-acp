@@ -1,5 +1,14 @@
 import readline from "node:readline";
 import { loadConfig, persistConfig, type PluginConfig } from "./config.ts";
+import {
+  composeCursorLaunchId,
+  resolveModelSelection,
+  safeEffort,
+  safeSpeed,
+  type EffortLevel,
+  type ModelCatalog,
+  type SpeedLevel,
+} from "./models.ts";
 import { RunController } from "./run-controller.ts";
 import { WorkspacePolicy } from "./policy.ts";
 import { RunStore } from "./run-store.ts";
@@ -66,7 +75,17 @@ const tools = [
       defaultProvider: { type: "string", enum: ["cursor", "grok"] },
       defaultModel: {
         type: "string",
-        description: "Optional CLI model pin. Empty string clears the stored default.",
+        description: "User keyword or catalog id. Resolved against the agent model list; the raw keyword is never stored. Empty string clears model, effort, and speed.",
+      },
+      defaultEffort: {
+        type: "string",
+        enum: ["low", "medium", "high", "xhigh", "max"],
+        description: "Reasoning effort (High). Persisted separately from the model id. Empty string clears.",
+      },
+      defaultSpeed: {
+        type: "string",
+        enum: ["fast", "standard"],
+        description: "Speed (Fast). Persisted separately. Cursor encodes it in the launch model id.",
       },
       enablePermissionResponses: { type: "boolean" },
       userConfirmed: {
@@ -86,7 +105,17 @@ const tools = [
       allowImplement: { type: "boolean" },
       model: {
         type: "string",
-        description: "Optional. Omit to use the configured default, then the provider CLI default.",
+        description: "Optional catalog id or keyword. Omit to use the configured default, then the provider CLI default.",
+      },
+      effort: {
+        type: "string",
+        enum: ["low", "medium", "high", "xhigh", "max"],
+        description: "Optional effort override for this run.",
+      },
+      speed: {
+        type: "string",
+        enum: ["fast", "standard"],
+        description: "Optional speed override for this run (Cursor Fast).",
       },
     },
   }),
@@ -235,12 +264,12 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
         result = configSnapshot(optionalString(args.suggestedWorkspace, "suggestedWorkspace", 4_096));
         break;
       case "configure":
-        onlyKeys(args, ["workspace", "defaultProvider", "defaultModel", "enablePermissionResponses", "userConfirmed"]);
+        onlyKeys(args, ["workspace", "defaultProvider", "defaultModel", "defaultEffort", "defaultSpeed", "enablePermissionResponses", "userConfirmed"]);
         if (args.userConfirmed !== true) throw new Error("configure requires explicit userConfirmed: true after the user chose or named these defaults.");
         result = applyConfigure(args);
         break;
       case "start":
-        onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model"]);
+        onlyKeys(args, ["provider", "cwd", "prompt", "mode", "allowImplement", "model", "effort", "speed"]);
         requireWorkspaceConfiguration();
         result = controller.start({
           provider: resolveStartProvider(args.provider),
@@ -248,7 +277,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
           prompt: requiredString(args.prompt, "prompt", 65_536),
           mode: stringEnum(args.mode, ["review", "plan", "implement"]),
           allowImplement: args.allowImplement === true,
-          model: resolveStartModel(args.provider, args.model),
+          ...resolveStartSelection(args.provider, args.model, args.effort, args.speed),
         });
         break;
       case "status":
@@ -412,6 +441,11 @@ function publicConfig(next: PluginConfig) {
     workspace: next.workspace,
     defaultProvider: next.defaultProvider,
     defaultModel: next.defaultModel,
+    defaultEffort: next.defaultEffort,
+    defaultSpeed: next.defaultSpeed,
+    launchModel: next.defaultProvider && next.defaultModel
+      ? launchModelFor(next.defaultProvider, next.defaultModel, next.defaultEffort, next.defaultSpeed)
+      : undefined,
     enablePermissionResponses: next.enablePermissionResponses,
     needsSetup: !next.workspace || !next.defaultProvider,
     writesProjectRuntimeDir: false,
@@ -426,9 +460,11 @@ function configSnapshot(suggestedWorkspace?: string) {
     note: provider.note,
   }));
   const snapshot = publicConfig(config);
+  const catalogs = controller.listModels();
   return {
     ...snapshot,
     providers,
+    catalogs,
     setupQuestions: snapshot.needsSetup
       ? [
         {
@@ -439,11 +475,7 @@ function configSnapshot(suggestedWorkspace?: string) {
             { id: "grok", label: "Grok Build (grok)" },
           ],
         },
-        {
-          id: "defaultModel",
-          prompt: "Optional default model. Leave unset to use the CLI default / selectedModel.",
-          optional: true,
-        },
+        ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
         {
           id: "workspace",
           prompt: "Absolute workspace root the provider may run in.",
@@ -451,22 +483,24 @@ function configSnapshot(suggestedWorkspace?: string) {
           optional: Boolean(config.workspace),
         },
       ]
-      : [],
+      : modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
   };
 }
 
 function applyConfigure(args: Record<string, unknown>) {
   const previousWorkspace = config.workspace;
+  const provider = args.defaultProvider === undefined
+    ? config.defaultProvider
+    : stringEnum(args.defaultProvider, ["cursor", "grok"]);
+  const resolved = resolveConfigureSelection(provider, args);
   const next = persistConfig({
     workspace: optionalString(args.workspace, "workspace", 4_096),
     defaultProvider: args.defaultProvider === undefined
       ? undefined
       : stringEnum(args.defaultProvider, ["cursor", "grok"]),
-    defaultModel: args.defaultModel === undefined
-      ? undefined
-      : args.defaultModel === "" || args.defaultModel === null
-        ? null
-        : requiredString(args.defaultModel, "defaultModel", 256),
+    defaultModel: resolved.model,
+    defaultEffort: resolved.effort,
+    defaultSpeed: resolved.speed,
     enablePermissionResponses: args.enablePermissionResponses === undefined
       ? undefined
       : args.enablePermissionResponses === true,
@@ -475,7 +509,10 @@ function applyConfigure(args: Record<string, unknown>) {
     controller.replacePolicy(createPolicy(next));
   }
   config = next;
-  return configSnapshot();
+  return {
+    ...configSnapshot(),
+    resolved,
+  };
 }
 
 function resolveStartProvider(value: unknown): "cursor" | "grok" | "fake" {
@@ -488,13 +525,114 @@ function resolveStartProvider(value: unknown): "cursor" | "grok" | "fake" {
   throw new Error(`No default provider is configured. Ask the user, then call configure, or pass provider on start. Settings live in ${config.configPath}.`);
 }
 
-function resolveStartModel(providerValue: unknown, modelValue: unknown): string | undefined {
-  const explicit = optionalString(modelValue, "model", 256);
-  if (explicit !== undefined) return explicit;
+function resolveStartSelection(
+  providerValue: unknown,
+  modelValue: unknown,
+  effortValue: unknown,
+  speedValue: unknown,
+): { model?: string; effort?: EffortLevel; speed?: SpeedLevel } {
   const provider = providerValue === undefined
     ? config.defaultProvider
     : stringEnum(providerValue, ["cursor", "grok", "fake"]);
-  return provider === config.defaultProvider ? config.defaultModel : undefined;
+  const useStored = provider === config.defaultProvider;
+  const explicitModel = optionalString(modelValue, "model", 256);
+  const effort = effortValue === undefined ? (useStored ? config.defaultEffort : undefined) : optionalEnum(safeEffort(effortValue));
+  const speed = speedValue === undefined ? (useStored ? config.defaultSpeed : undefined) : optionalEnum(safeSpeed(speedValue));
+  if (explicitModel !== undefined) {
+    const catalog = provider === "cursor" || provider === "grok"
+      ? controller.listModels(provider)[0]?.models ?? []
+      : [];
+    const resolved = resolveModelSelection(catalog, explicitModel, effort, speed, provider === "grok" ? "grok" : "cursor");
+    return { model: resolved?.model, effort: resolved?.effort, speed: resolved?.speed };
+  }
+  if (!useStored) return { effort, speed };
+  return { model: config.defaultModel, effort, speed };
+}
+
+function resolveConfigureSelection(provider: "cursor" | "grok" | undefined, args: Record<string, unknown>) {
+  const clearingModel = args.defaultModel === "" || args.defaultModel === null;
+  if (clearingModel) {
+    return { model: null, effort: null, speed: null, launchId: undefined as string | undefined };
+  }
+  const query = args.defaultModel === undefined
+    ? undefined
+    : requiredString(args.defaultModel, "defaultModel", 256);
+  const effort = args.defaultEffort === undefined ? undefined : safeEffort(args.defaultEffort);
+  const speed = args.defaultSpeed === undefined ? undefined : safeSpeed(args.defaultSpeed);
+  if (query === undefined && effort === undefined && speed === undefined) {
+    return { model: undefined, effort: undefined, speed: undefined, launchId: undefined as string | undefined };
+  }
+  if (!provider) {
+    throw new Error("Set defaultProvider before resolving a model keyword.");
+  }
+  const catalog = controller.listModels(provider)[0] ?? { provider, available: false, models: [] };
+  const resolved = resolveModelSelection(
+    catalog.models,
+    query ?? config.defaultModel,
+    effort === null ? undefined : effort ?? config.defaultEffort,
+    speed === null ? undefined : speed ?? config.defaultSpeed,
+    provider,
+  );
+  if (!resolved && query) {
+    throw new Error(`Could not resolve model keyword against the ${provider} catalog.`);
+  }
+  return {
+    model: query === undefined && !resolved ? undefined : resolved?.model ?? null,
+    effort: effort === null ? null : resolved?.effort ?? effort,
+    speed: speed === null ? null : resolved?.speed ?? speed,
+    launchId: resolved?.launchId,
+    query,
+    catalogId: resolved?.model,
+  };
+}
+
+function launchModelFor(
+  provider: "cursor" | "grok",
+  model: string,
+  effort?: EffortLevel,
+  speed?: SpeedLevel,
+): string {
+  return provider === "cursor" ? composeCursorLaunchId(model, effort, speed) : model;
+}
+
+function modelSetupQuestions(catalog?: ModelCatalog) {
+  const options = (catalog?.models ?? [])
+    .filter((model, index, all) => all.findIndex((entry) => entry.base === model.base) === index)
+    .slice(0, 40)
+    .map((model) => ({ id: model.base, label: `${model.label} (${model.base})` }));
+  return [
+    {
+      id: "defaultModel",
+      prompt: "Default model keyword or catalog id. The skill must resolve this against the agent model list and persist the catalog id, never the raw keyword.",
+      optional: true,
+      options,
+    },
+    {
+      id: "defaultEffort",
+      prompt: "Reasoning effort (High). Persist separately; do not bake it into a guessed model string.",
+      optional: true,
+      options: [
+        { id: "low", label: "low" },
+        { id: "medium", label: "medium" },
+        { id: "high", label: "High" },
+        { id: "xhigh", label: "xhigh" },
+        { id: "max", label: "max" },
+      ],
+    },
+    {
+      id: "defaultSpeed",
+      prompt: "Speed (Fast). Persist separately. Cursor composes this into the launch model id.",
+      optional: true,
+      options: [
+        { id: "fast", label: "Fast" },
+        { id: "standard", label: "standard" },
+      ],
+    },
+  ];
+}
+
+function optionalEnum<T>(value: T | null | undefined): T | undefined {
+  return value == null ? undefined : value;
 }
 
 function requireWorkspaceConfiguration(): void {

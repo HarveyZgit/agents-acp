@@ -25,6 +25,8 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
     "EXTERNAL_ACP_WORKSPACE",
     "EXTERNAL_ACP_DEFAULT_PROVIDER",
     "EXTERNAL_ACP_DEFAULT_MODEL",
+    "EXTERNAL_ACP_DEFAULT_EFFORT",
+    "EXTERNAL_ACP_DEFAULT_SPEED",
     "EXTERNAL_ACP_ALLOWED_SUBTREES",
     "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
     "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
@@ -75,6 +77,8 @@ test("plugin ships invocable $config and $dispatch skills", () => {
   assert.match(setup, /get_config/);
   assert.match(setup, /configure/);
   assert.match(setup, /userConfirmed/);
+  assert.match(setup, /catalog/);
+  assert.match(setup, /defaultEffort|defaultSpeed|Fast|High/);
   assert.match(setup, /Do not start an ACP run|do not call `start`/i);
 
   const dispatch = bodies.find((body) => /^name:\s*dispatch$/m.test(body)) ?? "";
@@ -163,20 +167,35 @@ test("configure persists defaults centrally and never writes the project", () =>
     workspace,
     defaultProvider: "cursor",
     defaultModel: "composer-2.5",
+    defaultEffort: "high",
+    defaultSpeed: "fast",
     enablePermissionResponses: true,
   }, env);
   assert.equal(saved.workspace, workspace);
   assert.equal(saved.defaultProvider, "cursor");
   assert.equal(saved.defaultModel, "composer-2.5");
+  assert.equal(saved.defaultEffort, "high");
+  assert.equal(saved.defaultSpeed, "fast");
   assert.equal(saved.configPath, join(home, ".codex", "agents-acp", "config.json"));
   const written = JSON.parse(readFileSync(saved.configPath, "utf8"));
   assert.equal(written.defaultProvider, "cursor");
   assert.equal(written.defaultModel, "composer-2.5");
+  assert.equal(written.defaultEffort, "high");
+  assert.equal(written.defaultSpeed, "fast");
   assert.equal(existsSync(join(workspace, ".agents-acp")), false);
 
   const cleared = persistConfig({ defaultModel: "" }, env);
   assert.equal(cleared.defaultModel, undefined);
-  assert.equal("defaultModel" in JSON.parse(readFileSync(saved.configPath, "utf8")), false);
+  assert.equal(cleared.defaultEffort, undefined);
+  assert.equal(cleared.defaultSpeed, undefined);
+  const clearedFile = JSON.parse(readFileSync(saved.configPath, "utf8"));
+  assert.equal("defaultModel" in clearedFile, false);
+  assert.equal("defaultEffort" in clearedFile, false);
+  assert.equal("defaultSpeed" in clearedFile, false);
+  assert.throws(
+    () => persistConfig({ defaultModel: "composer 2.5 high fast" }, env),
+    /catalog id|raw keyword/,
+  );
 
   const projectRuntime = join(workspace, ".agents-acp");
   const relocated = persistConfig({

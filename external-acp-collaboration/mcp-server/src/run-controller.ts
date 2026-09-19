@@ -29,6 +29,7 @@ import {
 import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
+import type { EffortLevel, ModelCatalog, SpeedLevel } from "./models.ts";
 
 const CLIENT_VERSION = "0.2.4-pre.1";
 const SHORT_TIMEOUT_MS = 30_000;
@@ -42,6 +43,8 @@ export type StartRequest = {
   mode: TaskMode;
   allowImplement?: boolean;
   model?: string;
+  effort?: EffortLevel;
+  speed?: SpeedLevel;
   sessionId?: string;
 };
 
@@ -126,6 +129,12 @@ export class RunController {
 
   listProviders(): ReturnType<AcpProvider["discover"]>[] {
     return [...this.providers.values()].map((provider) => provider.discover());
+  }
+
+  listModels(provider?: ProviderName): ModelCatalog[] {
+    const selected = provider ? this.providers.get(provider) : undefined;
+    const targets = selected ? [selected] : [...this.providers.values()].filter((item) => item.name !== "fake");
+    return targets.map((item) => item.listModels({ envMode: this.envMode, envPassthrough: this.envPassthrough }));
   }
 
   hasActiveRuns(): boolean {

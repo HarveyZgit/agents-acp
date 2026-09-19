@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { safeEffort, safeSpeed, type EffortLevel, type SpeedLevel } from "./models.ts";
 
 export type EnvMode = "session" | "inherit" | "minimal";
 export type DefaultProviderName = "cursor" | "grok";
@@ -19,6 +20,8 @@ export type PluginConfig = {
   enableFake: boolean;
   defaultProvider?: DefaultProviderName;
   defaultModel?: string;
+  defaultEffort?: EffortLevel;
+  defaultSpeed?: SpeedLevel;
   runtimeDir: string;
   configPath: string;
   configLoaded: boolean;
@@ -28,6 +31,8 @@ export type ConfigureRequest = {
   workspace?: string;
   defaultProvider?: DefaultProviderName;
   defaultModel?: string | null;
+  defaultEffort?: EffortLevel | null;
+  defaultSpeed?: SpeedLevel | null;
   enablePermissionResponses?: boolean;
 };
 
@@ -82,6 +87,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
     enableFake: booleanSetting(env.EXTERNAL_ACP_ENABLE_FAKE, file.enableFake),
     defaultProvider: providerName(trimmed(env.EXTERNAL_ACP_DEFAULT_PROVIDER) ?? file.defaultProvider),
     defaultModel: safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel),
+    defaultEffort: ignoreInvalid(() => optionalEnum(safeEffort(trimmed(env.EXTERNAL_ACP_DEFAULT_EFFORT) ?? file.defaultEffort))),
+    defaultSpeed: ignoreInvalid(() => optionalEnum(safeSpeed(trimmed(env.EXTERNAL_ACP_DEFAULT_SPEED) ?? file.defaultSpeed))),
     runtimeDir,
     configPath,
     configLoaded: file.loaded,
@@ -129,8 +136,26 @@ export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv 
   }
   if (updates.defaultModel !== undefined) {
     const model = safeStoredModel(updates.defaultModel);
-    if (model) next.defaultModel = model;
-    else delete next.defaultModel;
+    if (model) {
+      if (/\s/.test(model)) {
+        throw new Error("defaultModel must be a catalog id resolved from the agent model list, not a raw keyword.");
+      }
+      next.defaultModel = model;
+    } else {
+      delete next.defaultModel;
+      delete next.defaultEffort;
+      delete next.defaultSpeed;
+    }
+  }
+  if (updates.defaultEffort !== undefined) {
+    const effort = safeEffort(updates.defaultEffort);
+    if (effort) next.defaultEffort = effort;
+    else delete next.defaultEffort;
+  }
+  if (updates.defaultSpeed !== undefined) {
+    const speed = safeSpeed(updates.defaultSpeed);
+    if (speed) next.defaultSpeed = speed;
+    else delete next.defaultSpeed;
   }
   if (updates.enablePermissionResponses !== undefined) {
     next.enablePermissionResponses = updates.enablePermissionResponses === true;
@@ -169,6 +194,8 @@ function persistableFields(file: FileConfig): Record<string, unknown> {
     "enableFake",
     "defaultProvider",
     "defaultModel",
+    "defaultEffort",
+    "defaultSpeed",
   ] as const) {
     if (file[key] !== undefined) next[key] = file[key];
   }
@@ -260,4 +287,16 @@ function boundedInteger(
 
 function envMode(value: string | undefined): EnvMode {
   return value === "inherit" || value === "minimal" ? value : "session";
+}
+
+function optionalEnum<T>(value: T | null | undefined): T | undefined {
+  return value == null ? undefined : value;
+}
+
+function ignoreInvalid<T>(read: () => T | undefined): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
 }

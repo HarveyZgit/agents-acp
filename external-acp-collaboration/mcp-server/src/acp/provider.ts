@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { EnvMode } from "../config.ts";
+import type { CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
 
 export type ProviderName = "cursor" | "grok" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
@@ -60,6 +61,8 @@ export type StartOptions = {
   prompt: string;
   mode: TaskMode;
   model?: string;
+  effort?: EffortLevel;
+  speed?: SpeedLevel;
   sessionId?: string;
   envMode?: EnvMode;
   envPassthrough?: string[];
@@ -324,6 +327,16 @@ export abstract class AcpProvider {
    */
   cliSessionKnownGood(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): boolean {
     return false;
+  }
+
+  listModels(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
+    const provider = this.name === "cursor" || this.name === "grok" ? this.name : undefined;
+    return {
+      provider: (provider ?? "cursor") as CatalogProvider,
+      available: false,
+      models: [],
+      error: `${this.name} does not expose a model catalog.`,
+    };
   }
 
   discover(): ProviderAvailability {

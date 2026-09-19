@@ -8,6 +8,7 @@ import {
   type ProviderName,
   type StartOptions,
 } from "./provider.ts";
+import { composeCursorLaunchId, parseListModelsOutput, type ModelCatalog } from "../models.ts";
 
 /**
  * Only the official `cursor-agent` binary is used. `cursor` is the desktop
@@ -111,7 +112,7 @@ export class CursorProvider extends AcpProvider {
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Optional start.model pins a CLI model (for example composer-2.5) onto a Cursor billing pool; omit it to use the CLI selectedModel default.`,
+      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast).`,
     };
   }
 
@@ -119,9 +120,33 @@ export class CursorProvider extends AcpProvider {
     const resolved = this.resolve();
     if (!resolved) throw new Error("cursor-agent ACP is unavailable on PATH. This provider intentionally does not fall back to cursor or agent.");
     const model = safeModelId(options.model, "Cursor");
+    const launch = model
+      ? composeCursorLaunchId(model, options.effort, options.speed)
+      : undefined;
     // Official ACP docs omit a universal model field; the CLI still accepts
-    // `cursor-agent --model <id> acp` so quota can be pinned to a billing pool.
-    return model ? ["--model", model, ...resolved.args] : [...resolved.args];
+    // `cursor-agent --model <id> acp`. Effort/speed are encoded in that id.
+    return launch ? ["--model", launch, ...resolved.args] : [...resolved.args];
+  }
+
+  listModels(options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
+    const env = probeEnvironment(options);
+    const listed = this.probe.run(EXECUTABLE, ["--list-models"], env);
+    const fallback = succeeded(listed) ? listed : this.probe.run(EXECUTABLE, ["models"], env);
+    if (!succeeded(fallback)) {
+      return {
+        provider: "cursor",
+        available: false,
+        models: [],
+        error: "cursor-agent --list-models is unavailable. Start Codex from the same login where cursor-agent models works.",
+      };
+    }
+    const models = parseListModelsOutput(`${fallback.stdout ?? ""}\n${fallback.stderr ?? ""}`);
+    return {
+      provider: "cursor",
+      available: models.length > 0,
+      models,
+      error: models.length > 0 ? undefined : "cursor-agent listed no models for this account.",
+    };
   }
 
   authenticationMethod(initialized: Record<string, unknown>): AuthMethod | undefined {

@@ -47,7 +47,9 @@ Fields:
 | --- | --- |
 | `workspace` | Required before `start`. The only root in which providers may be started. |
 | `defaultProvider` | `cursor` or `grok`. Set by `configure` or named in a user prompt. |
-| `defaultModel` | Optional CLI model pin. Omit or clear to use the provider CLI default. |
+| `defaultModel` | Catalog model id resolved from a user keyword. Never store the raw keyword. |
+| `defaultEffort` | Reasoning effort (`low` / `medium` / `high` / `xhigh` / `max`). High is `high`. |
+| `defaultSpeed` | Cursor speed: `fast` or `standard`. Fast is `fast`. |
 | `allowedSubtrees` | Extra launch directories, each inside `workspace`. |
 | `enablePermissionResponses` | Enables `respond_permission` / `respond_question` / `respond_plan`. |
 | `allowUnsandboxedImplement` | Required for `implement`; provider writes are not OS-sandboxed. |
@@ -60,7 +62,8 @@ Fields:
 The plugin's `.mcp.json` also declares `env_vars`, so Codex forwards these when
 they exist in its own environment, and they override the config file:
 `AGENTS_ACP_CONFIG`, `AGENTS_ACP_HOME`, `EXTERNAL_ACP_WORKSPACE`, `EXTERNAL_ACP_DEFAULT_PROVIDER`,
-`EXTERNAL_ACP_DEFAULT_MODEL`, `EXTERNAL_ACP_ALLOWED_SUBTREES`,
+`EXTERNAL_ACP_DEFAULT_MODEL`, `EXTERNAL_ACP_DEFAULT_EFFORT`,
+`EXTERNAL_ACP_DEFAULT_SPEED`, `EXTERNAL_ACP_ALLOWED_SUBTREES`,
 `EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT`,
 `EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES`, `EXTERNAL_ACP_MAX_RUN_MS`,
 `EXTERNAL_ACP_IDLE_TIMEOUT_MS`, `EXTERNAL_ACP_STORE_PATH`,

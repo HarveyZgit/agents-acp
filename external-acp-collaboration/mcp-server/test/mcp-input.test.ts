@@ -93,6 +93,8 @@ test("MCP get_config and configure write centralized defaults, not project .agen
     workspace,
     defaultProvider: "cursor",
     defaultModel: "composer-2.5",
+    defaultEffort: "high",
+    defaultSpeed: "fast",
     enablePermissionResponses: true,
     userConfirmed: true,
   });
@@ -119,12 +121,19 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   assert.equal(before.needsSetup, true);
   assert.equal(before.runtimeDir, join(home, ".codex", "agents-acp"));
   assert.equal(before.writesProjectRuntimeDir, false);
+  assert.ok(Array.isArray(before.catalogs));
   assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultProvider"));
+  assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultEffort"));
+  assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultSpeed"));
 
   const after = JSON.parse(saved.result.content[0].text);
   assert.equal(after.needsSetup, false);
   assert.equal(after.defaultProvider, "cursor");
   assert.equal(after.defaultModel, "composer-2.5");
+  assert.equal(after.defaultEffort, "high");
+  assert.equal(after.defaultSpeed, "fast");
+  assert.equal(after.launchModel, "composer-2.5-high-fast");
+  assert.equal(after.resolved?.catalogId, "composer-2.5");
   assert.equal(after.workspace, workspace);
   assert.equal(existsSync(join(workspace, ".agents-acp")), false);
   assert.ok(fakeStart);

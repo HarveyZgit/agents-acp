@@ -190,9 +190,13 @@ test("model arguments are optional and passed only as startup CLI flags", () => 
     cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "composer-2.5" }),
     ["--model", "composer-2.5", "acp"],
   );
+  assert.deepEqual(
+    cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "composer-2.5", effort: "high", speed: "fast" }),
+    ["--model", "composer-2.5-high-fast", "acp"],
+  );
   assert.equal(cursor.capabilities.supportsModelSelection, true);
   assert.equal(cursor.capabilities.modelSelection, "startup");
-  assert.match(cursor.discover().note ?? "", /billing pool|selectedModel/);
+  assert.match(cursor.discover().note ?? "", /effort|speed|catalog|composer-2.5-high-fast/);
   assert.throws(
     () => cursor.command({ cwd: "/project", prompt: "task", mode: "review", model: "--always-approve" }),
     /cannot be interpreted as a CLI flag/,
@@ -205,6 +209,10 @@ test("model arguments are optional and passed only as startup CLI flags", () => 
   assert.deepEqual(
     new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "grok-build" }),
     ["--no-auto-update", "--cwd", "/project", "agent", "--no-leader", "--model", "grok-build", "stdio"],
+  );
+  assert.deepEqual(
+    new GrokProvider().command({ cwd: "/project", prompt: "task", mode: "plan", model: "grok-4", effort: "high" }),
+    ["--no-auto-update", "--cwd", "/project", "agent", "--no-leader", "--model", "grok-4", "--effort", "high", "stdio"],
   );
   assert.deepEqual(
     new GrokProvider().authenticateParams({ methodId: "cached_token" }),
@@ -237,6 +245,20 @@ function availableCursor(): CursorProvider {
     "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
   }));
 }
+
+test("Cursor listModels parses --list-models catalog rows", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent --version": { status: 0, stdout: "1.0.0\n" },
+    "cursor-agent acp --help": { status: 0, stdout: "acp\n" },
+    "cursor-agent --list-models": {
+      status: 0,
+      stdout: "Available models\ncomposer-2.5 - Composer 2.5\ncomposer-2.5-high-fast - Composer 2.5 High Fast\n",
+    },
+  }));
+  const catalog = provider.listModels();
+  assert.equal(catalog.available, true);
+  assert.equal(catalog.models.some((model) => model.id === "composer-2.5-high-fast" && model.base === "composer-2.5"), true);
+});
 
 test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   const provider = availableCursor();

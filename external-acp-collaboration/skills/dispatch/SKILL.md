@@ -12,9 +12,9 @@ Runtime files stay in `~/.codex/agents-acp`. Never create or write `.agents-acp`
 1. Call `get_config` with `suggestedWorkspace` set to the current project root.
 2. If `needsSetup` is true, do **not** guess a provider. Ask the user with the returned `setupQuestions`, or apply values they already named in the prompt (`cursor` / `grok`, optional model). Then call `configure` with `userConfirmed: true`.
 3. If the user later says to change the default agent or model, follow `$config` (ask or use the named values, then `configure`).
-4. Call `list_providers` and report unavailable local executables clearly. Prefer the stored `defaultProvider` / `defaultModel`. A start may omit `provider` and `model` after configure. Pass `provider` or `model` only to override for that run.
+4. Call `list_providers` and report unavailable local executables clearly. Prefer the stored `defaultProvider` / `defaultModel` / `defaultEffort` / `defaultSpeed`. A start may omit `provider`, `model`, `effort`, and `speed` after configure. Pass those fields only to override for that run. If the user names a model keyword, resolve it against that agent's catalog before `start`; do not pass the raw keyword.
 
-Cursor uses `cursor-agent acp` only; it never falls back to `cursor` or `agent`. Official ACP has no universal model field; the CLI still accepts `cursor-agent --model <id> acp`.
+Cursor uses `cursor-agent acp` only; it never falls back to `cursor` or `agent`. Official ACP has no universal model field; the CLI still accepts `cursor-agent --model <id> acp`. Fast is `speed=fast` and High is `effort=high`; Cursor composes them into the launch id.
 
 5. Use `review` or `plan` for read-only questions. These runs may be parallel. A run fails rather than silently using a write-capable default mode.
 6. Use `implement` only when the user explicitly asks for changes, pass `allowImplement: true`, and only after the local operator enabled unsandboxed implementation. It is serialized per workspace.

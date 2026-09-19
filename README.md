@@ -32,9 +32,9 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | Tool | Purpose |
 | --- | --- |
 | `list_providers` | Discovered providers, resolved ACP command, centralized config path, and defaults |
-| `get_config` | Runtime dir, defaults, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
-| `configure` | Persist default provider/model and workspace under `~/.codex/agents-acp` after the user answers or names them |
-| `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model` may be omitted after configure |
+| `get_config` | Runtime dir, defaults, catalogs, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
+| `configure` | Persist default provider, catalog model id, effort (High), speed (Fast), and workspace. Resolves keywords against the agent model list |
+| `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model`/`effort`/`speed` may be omitted after configure |
 | `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |
 | `result` | Final text, `stopReason`, changed files, verification advice |
 | `cancel` | ACP cancel notification plus process-group termination |
@@ -48,7 +48,7 @@ IDE extension, or `@` in ChatGPT):
 
 | Skill | Purpose |
 | --- | --- |
-| `$config` | First-time init or later change of default agent / model / workspace |
+| `$config` | First-time init or later change of default agent / model / High effort / Fast speed |
 | `$dispatch` | Dispatch a scoped ACP run. Calls `$config` first when `needsSetup` |
 
 ### Protocol behavior
@@ -124,11 +124,13 @@ IDE extension, or `@` in ChatGPT):
   stale and corrupt state is reclaimed, and a persistence failure marks the run
   `storeDegraded` rather than taking down the MCP server.
 
-After `configure`, `start` may omit `provider` and `model` and uses the stored
-defaults. Pass either field only to override that run. Cursor accepts optional
-startup `--model` (`cursor-agent --model <id> acp`) so a billing pool can be
-pinned after a usage cap (for example `composer-2.5`). Model values are
-validated as a single argv element and never concatenated into a prompt.
+After `configure`, `start` may omit `provider`, `model`, `effort`, and `speed`
+and uses the stored defaults. Pass those fields only to override that run.
+`$config` resolves a user keyword against `cursor-agent --list-models` or
+`grok models` and stores the catalog id, never the raw text. Fast is
+`defaultSpeed` and High is `defaultEffort`. Cursor composes them into the
+launch id (`composer-2.5-high-fast`); Grok passes `--model` plus `--effort`.
+Model values are a single argv element and never concatenated into a prompt.
 
 ## Installation
 
