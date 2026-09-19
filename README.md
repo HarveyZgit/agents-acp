@@ -31,8 +31,10 @@ streamed text to disk; streamed text stays in memory while the server runs.
 
 | Tool | Purpose |
 | --- | --- |
-| `list_providers` | Discovered providers, resolved ACP command, and config path |
-| `start` | Start a `review`, `plan`, or `implement` run |
+| `list_providers` | Discovered providers, resolved ACP command, centralized config path, and defaults |
+| `get_config` | Runtime dir, defaults, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
+| `configure` | Persist default provider/model and workspace under `~/.codex/agents-acp` after the user answers or names them |
+| `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model` may be omitted after configure |
 | `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |
 | `result` | Final text, `stopReason`, changed files, verification advice |
 | `cancel` | ACP cancel notification plus process-group termination |
@@ -41,6 +43,14 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | `respond_question` | Answer or skip a Cursor multiple-choice question |
 | `respond_plan` | Accept or reject a Cursor plan approval |
 
+The plugin also ships two Codex skills (invoke with `$` in Codex CLI / the
+IDE extension, or `@` in ChatGPT):
+
+| Skill | Purpose |
+| --- | --- |
+| `$agents-acp-setup` | First-time init or later change of default agent / model / workspace |
+| `$agents-acp` | Delegate a scoped ACP run. Calls setup first when `needsSetup` |
+
 ### Protocol behavior
 
 - Authentication follows ACP: after `initialize`, `session/new` is attempted
@@ -48,15 +58,17 @@ streamed text to disk; streamed text stays in memory while the server runs.
   triggers `authenticate`, and only with an advertised non-terminal method.
   Auth descriptors are read from either `methodId` or `id`. A terminal-only
   method is never sent to `authenticate`. If `authenticate(cursor_login)`
-  returns `-32602` (Invalid params), the plugin treats protocol authenticate as
-  invalid or unnecessary for that Cursor build when a CLI session exists, then
-  retries `session/new` without authenticate. The same `-32602` retry applies
-  when a provider authenticates first. Grok authenticate includes
-  `_meta.headless: true` as in the official x.ai ACP scripting example.
-  When the pre-authenticated path was used and `cursor-agent status` is
-  already good, failures never tell the operator to log in or to run
-  `cursor-agent login`. A bare `Permission denied` from `session/new` is
-  expanded to name workspace and provider-session file access.
+  returns `-32602` (Invalid params), the plugin retries `session/new` once in
+  case an older CLI already had a usable session. If that retry still reports
+  `auth_required`, the `-32602` is treated as a failed authenticate (unknown
+  method, no browser, or login timeout) — not as proof that login already
+  exists. The same one-shot retry applies when a provider authenticates first.
+  Grok authenticate includes `_meta.headless: true` as in the official x.ai
+  ACP scripting example. When `cursor-agent status` is already good, failures
+  never tell the operator to log in again. A later `session/new` failure such
+  as `Failed to initialize session services` is reported as that service
+  error, not as a missing login. A bare `Permission denied` from
+  `session/new` is expanded to name workspace and provider-session file access.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
   `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,
@@ -112,11 +124,10 @@ streamed text to disk; streamed text stays in memory while the server runs.
   stale and corrupt state is reclaimed, and a persistence failure marks the run
   `storeDegraded` rather than taking down the MCP server.
 
-Default `start` guidance is `provider: "grok"` with **no** `model`; Grok then
-uses its CLI default. Pass `model` only when the user names one. Cursor also
-accepts optional startup `--model` (`cursor-agent --model <id> acp`) so a
-billing pool can be pinned after a usage cap (for example `composer-2.5`).
-Omitting Cursor `model` uses the CLI `selectedModel`. Model values are
+After `configure`, `start` may omit `provider` and `model` and uses the stored
+defaults. Pass either field only to override that run. Cursor accepts optional
+startup `--model` (`cursor-agent --model <id> acp`) so a billing pool can be
+pinned after a usage cap (for example `composer-2.5`). Model values are
 validated as a single argv element and never concatenated into a prompt.
 
 ## Installation
@@ -130,11 +141,20 @@ mkdir -p ~/.codex/agents-acp
 cat > ~/.codex/agents-acp/config.json <<'JSON'
 {
   "workspace": "/absolute/path/to/project",
-  "enablePermissionResponses": true
+  "enablePermissionResponses": true,
+  "defaultProvider": "cursor"
 }
 JSON
 codex plugin marketplace add /absolute/path/to/agents-acp
 ```
+
+Or skip the seed file: after install, invoke the plugin skill
+`$agents-acp-setup` (or ask Codex to initialize / change the default agent
+or model). That skill calls `get_config` then `configure` and writes
+`~/.codex/agents-acp`. The plugin never creates `.agents-acp` in a project.
+
+A later `$agents-acp` run uses those stored defaults. `$agents-acp-setup`
+again changes the default agent or model without starting a run.
 
 Any `EXTERNAL_ACP_*` variable listed in the plugin's `.mcp.json` `env_vars`
 overrides the corresponding config file value when Codex forwards it.

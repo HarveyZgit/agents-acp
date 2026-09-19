@@ -581,7 +581,10 @@ test("COMPAT plugin packaging keeps camelCase mcpServers, cwd, env_vars names, a
   assert.deepEqual(declared.args, ["--experimental-strip-types", "./mcp-server/src/index.ts"]);
   for (const name of [
     "AGENTS_ACP_CONFIG",
+    "AGENTS_ACP_HOME",
     "EXTERNAL_ACP_WORKSPACE",
+    "EXTERNAL_ACP_DEFAULT_PROVIDER",
+    "EXTERNAL_ACP_DEFAULT_MODEL",
     "EXTERNAL_ACP_ALLOWED_SUBTREES",
     "EXTERNAL_ACP_ALLOW_UNSANDBOXED_IMPLEMENT",
     "EXTERNAL_ACP_ENABLE_PERMISSION_RESPONSES",
@@ -668,7 +671,7 @@ test("MCP adversarial: initialize gate, malformed envelopes, typed flags, and ov
   assert.match(byId(3).result.content[0].text, /Expected cwd/);
   assert.match(byId(4).result.content[0].text, /Expected prompt/);
   assert.match(byId(5).result.content[0].text, /allowImplement|ALLOW_UNSANDBOXED_IMPLEMENT/);
-  assert.match(byId(6).result.content[0].text, /Unsupported provider/);
+  assert.match(byId(6).result.content[0].text, /Unsupported provider|fake provider is disabled/);
   assert.match(byId(7).result.content[0].text, /userConfirmed/);
   assert.match(byId(8).result.content[0].text, /CLI flag|cursor-agent ACP is unavailable/);
   assert.match(byId(9).error?.message ?? byId(9).result?.content?.[0]?.text ?? "", /Unknown resource URI|Unknown run/);

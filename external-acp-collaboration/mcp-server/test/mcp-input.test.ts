@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -56,4 +56,79 @@ test("MCP server fails closed for absent workspace configuration and malformed t
   assert.match(unexpected.result.content[0].text, /Unexpected tool argument/);
   assert.equal(disabledResponse.result.isError, true);
   assert.match(disabledResponse.result.content[0].text, /Responses are disabled/);
+});
+
+test("MCP get_config and configure write centralized defaults, not project .agents-acp", async () => {
+  const home = mkdtempSync(join(tmpdir(), "external-acp-setup-home-"));
+  const workspace = mkdtempSync(join(tmpdir(), "external-acp-setup-ws-"));
+  const child = spawn(process.execPath, ["--experimental-strip-types", "src/index.ts"], {
+    cwd: new URL("..", import.meta.url),
+    env: { PATH: process.env.PATH, HOME: home, EXTERNAL_ACP_ENABLE_FAKE: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const output: string[] = [];
+  const errors: string[] = [];
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => output.push(...chunk.trim().split("\n").filter(Boolean)));
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => errors.push(chunk));
+
+  const send = (id: number, name: string, args: Record<string, unknown>) => {
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name, arguments: args },
+    })}\n`);
+  };
+
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} })}\n`);
+  send(1, "get_config", { suggestedWorkspace: workspace });
+  send(5, "configure", {
+    workspace,
+    defaultProvider: "cursor",
+    userConfirmed: false,
+  });
+  send(2, "configure", {
+    workspace,
+    defaultProvider: "cursor",
+    defaultModel: "composer-2.5",
+    enablePermissionResponses: true,
+    userConfirmed: true,
+  });
+  send(3, "start", { provider: "fake", cwd: workspace, prompt: "task", mode: "review" });
+  send(4, "start", { cwd: workspace, prompt: "task", mode: "review" });
+  child.stdin.end();
+  await new Promise<void>((resolve, reject) => {
+    child.on("close", () => resolve());
+    child.on("error", reject);
+  });
+
+  const responses = output.map((line) => JSON.parse(line));
+  const preview = responses.find((response) => response.id === 1);
+  const saved = responses.find((response) => response.id === 2);
+  const fakeStart = responses.find((response) => response.id === 3);
+  const defaultStart = responses.find((response) => response.id === 4);
+  const unconfirmed = responses.find((response) => response.id === 5);
+  assert.ok(preview, errors.join(""));
+  assert.ok(saved, errors.join(""));
+  assert.ok(unconfirmed, errors.join(""));
+  assert.equal(unconfirmed.result.isError, true);
+  assert.match(unconfirmed.result.content[0].text, /userConfirmed/);
+  const before = JSON.parse(preview.result.content[0].text);
+  assert.equal(before.needsSetup, true);
+  assert.equal(before.runtimeDir, join(home, ".codex", "agents-acp"));
+  assert.equal(before.writesProjectRuntimeDir, false);
+  assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultProvider"));
+
+  const after = JSON.parse(saved.result.content[0].text);
+  assert.equal(after.needsSetup, false);
+  assert.equal(after.defaultProvider, "cursor");
+  assert.equal(after.defaultModel, "composer-2.5");
+  assert.equal(after.workspace, workspace);
+  assert.equal(existsSync(join(workspace, ".agents-acp")), false);
+  assert.ok(fakeStart);
+  assert.ok(!fakeStart.result.isError, fakeStart.result.content[0].text);
+  assert.ok(defaultStart);
+  assert.equal(/No default provider/i.test(defaultStart.result.content[0].text), false);
 });

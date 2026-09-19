@@ -1,8 +1,10 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 export type EnvMode = "session" | "inherit" | "minimal";
+export type DefaultProviderName = "cursor" | "grok";
 
 export type PluginConfig = {
   workspace?: string;
@@ -11,24 +13,41 @@ export type PluginConfig = {
   enablePermissionResponses: boolean;
   maxRunMs: number;
   idleTimeoutMs: number;
-  storePath?: string;
+  storePath: string;
   envMode: EnvMode;
   cursorEnvPassthrough: string[];
   enableFake: boolean;
+  defaultProvider?: DefaultProviderName;
+  defaultModel?: string;
+  runtimeDir: string;
   configPath: string;
   configLoaded: boolean;
 };
 
+export type ConfigureRequest = {
+  workspace?: string;
+  defaultProvider?: DefaultProviderName;
+  defaultModel?: string | null;
+  enablePermissionResponses?: boolean;
+};
+
 const DEFAULT_MAX_RUN_MS = 7_200_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 900_000;
+const CENTRAL_DIR_NAME = "agents-acp";
 
 /**
  * Codex launches bundled MCP servers itself, so a plugin cannot assume the
  * user's shell environment is present. Configuration therefore comes from a
  * stable on-disk file first; `env_vars` forwarded by Codex override it.
+ *
+ * Runtime files stay under ~/.codex/agents-acp (or AGENTS_ACP_HOME /
+ * AGENTS_ACP_CONFIG). Project-local `.agents-acp` directories and PLUGIN_DATA
+ * that would land there are ignored so the plugin never creates workspace
+ * runtime files.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
   const configPath = resolveConfigPath(env);
+  const runtimeDir = path.dirname(configPath);
   const file = readConfigFile(configPath);
   return {
     workspace: trimmed(env.EXTERNAL_ACP_WORKSPACE) ?? trimmed(file.workspace),
@@ -51,12 +70,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
       30_000,
       86_400_000,
     ),
-    storePath: trimmed(env.EXTERNAL_ACP_STORE_PATH) ?? trimmed(file.storePath),
+    storePath: resolveStorePath(
+      trimmed(env.EXTERNAL_ACP_STORE_PATH) ?? trimmed(file.storePath),
+      runtimeDir,
+      env,
+    ),
     envMode: envMode(trimmed(env.EXTERNAL_ACP_ENV_MODE) ?? trimmed(file.envMode)),
     cursorEnvPassthrough: env.EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH !== undefined
       ? splitNames(env.EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH)
       : stringArray(file.cursorEnvPassthrough),
     enableFake: booleanSetting(env.EXTERNAL_ACP_ENABLE_FAKE, file.enableFake),
+    defaultProvider: providerName(trimmed(env.EXTERNAL_ACP_DEFAULT_PROVIDER) ?? file.defaultProvider),
+    defaultModel: safeStoredModel(trimmed(env.EXTERNAL_ACP_DEFAULT_MODEL) ?? file.defaultModel),
+    runtimeDir,
     configPath,
     configLoaded: file.loaded,
   };
@@ -64,10 +90,53 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PluginConfig {
 
 export function resolveConfigPath(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = trimmed(env.AGENTS_ACP_CONFIG);
-  if (explicit) return path.resolve(explicit);
-  const pluginData = trimmed(env.PLUGIN_DATA) ?? trimmed(env.CLAUDE_PLUGIN_DATA);
-  if (pluginData) return path.join(path.resolve(pluginData), "config.json");
-  return path.join(homedir(), ".codex", "agents-acp", "config.json");
+  if (explicit) {
+    const resolved = path.resolve(explicit);
+    return isProjectLocalRuntimeDir(path.dirname(resolved))
+      ? path.join(centralRuntimeDir(env), "config.json")
+      : resolved;
+  }
+  const home = trimmed(env.AGENTS_ACP_HOME);
+  if (home) {
+    const resolved = path.resolve(home);
+    return isProjectLocalRuntimeDir(resolved)
+      ? path.join(centralRuntimeDir(env), "config.json")
+      : path.join(resolved, "config.json");
+  }
+  return path.join(centralRuntimeDir(env), "config.json");
+}
+
+export function centralRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(homedirFrom(env), ".codex", CENTRAL_DIR_NAME);
+}
+
+export function isProjectLocalRuntimeDir(directory: string): boolean {
+  return path.basename(path.resolve(directory)) === ".agents-acp";
+}
+
+export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv = process.env): PluginConfig {
+  const configPath = resolveConfigPath(env);
+  if (isProjectLocalRuntimeDir(path.dirname(configPath))) {
+    throw new Error("agents-acp refuses to write a project-local .agents-acp directory. Runtime files stay in ~/.codex/agents-acp.");
+  }
+  const existing = readConfigFile(configPath);
+  const next: Record<string, unknown> = persistableFields(existing);
+  if (updates.workspace !== undefined) next.workspace = existingDirectory(updates.workspace);
+  if (updates.defaultProvider !== undefined) {
+    const provider = providerName(updates.defaultProvider);
+    if (!provider) throw new Error('defaultProvider must be "cursor" or "grok".');
+    next.defaultProvider = provider;
+  }
+  if (updates.defaultModel !== undefined) {
+    const model = safeStoredModel(updates.defaultModel);
+    if (model) next.defaultModel = model;
+    else delete next.defaultModel;
+  }
+  if (updates.enablePermissionResponses !== undefined) {
+    next.enablePermissionResponses = updates.enablePermissionResponses === true;
+  }
+  atomicWrite(configPath, next);
+  return loadConfig(env);
 }
 
 type FileConfig = Partial<Record<keyof PluginConfig, unknown>> & { loaded: boolean };
@@ -83,6 +152,74 @@ function readConfigFile(configPath: string): FileConfig {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { loaded: false };
     throw new Error(`Unable to read agents-acp configuration at ${configPath}: ${(error as Error).message}`);
   }
+}
+
+function persistableFields(file: FileConfig): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  for (const key of [
+    "workspace",
+    "allowedSubtrees",
+    "allowUnsandboxedImplement",
+    "enablePermissionResponses",
+    "maxRunMs",
+    "idleTimeoutMs",
+    "storePath",
+    "envMode",
+    "cursorEnvPassthrough",
+    "enableFake",
+    "defaultProvider",
+    "defaultModel",
+  ] as const) {
+    if (file[key] !== undefined) next[key] = file[key];
+  }
+  return next;
+}
+
+function atomicWrite(configPath: string, value: Record<string, unknown>): void {
+  mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
+  const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, configPath);
+}
+
+function resolveStorePath(value: string | undefined, runtimeDir: string, env: NodeJS.ProcessEnv): string {
+  if (!value) return path.join(runtimeDir, "runs.json");
+  const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(runtimeDir, value);
+  return isProjectLocalRuntimeDir(path.dirname(resolved))
+    ? path.join(centralRuntimeDir(env), "runs.json")
+    : resolved;
+}
+
+function existingDirectory(value: string): string {
+  const resolved = path.resolve(value);
+  if (!path.isAbsolute(value) || value.includes("\0")) {
+    throw new Error("workspace must be an absolute filesystem path.");
+  }
+  try {
+    if (!statSync(resolved).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new Error("workspace must be an existing accessible directory.");
+  }
+  return resolved;
+}
+
+function providerName(value: unknown): DefaultProviderName | undefined {
+  return value === "cursor" || value === "grok" ? value : undefined;
+}
+
+function safeStoredModel(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("defaultModel must be a string.");
+  const model = value.trim();
+  if (!model) return undefined;
+  if (model.startsWith("-") || !/^[A-Za-z0-9._:/\- ]{1,128}$/.test(model)) {
+    throw new Error("defaultModel must be a documented model identifier and cannot be interpreted as a CLI flag.");
+  }
+  return model;
+}
+
+function homedirFrom(env: NodeJS.ProcessEnv): string {
+  return trimmed(env.HOME) ?? homedir();
 }
 
 function trimmed(value: unknown): string | undefined {
