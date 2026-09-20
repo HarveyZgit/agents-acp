@@ -9,6 +9,7 @@ import {
   type StartOptions,
 } from "./provider.ts";
 import { composeCursorLaunchId, parseListModelsOutput, type ModelCatalog } from "../models.ts";
+import { collisionNamesFor, inspectLaunch, resolveOfficialCli, resolveOnPath, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
 
 /**
  * Only the official `cursor-agent` binary is used. `cursor` is the desktop
@@ -57,6 +58,8 @@ type ResolvedCursorLaunch = {
   version?: string;
 };
 
+const CURSOR_COLLISIONS = collisionNamesFor("cursor");
+
 class ProcessCursorProbe implements CursorProbe {
   run(executable: string, args: string[], env: NodeJS.ProcessEnv = probeEnvironment()): CursorProbeResult {
     const result = spawnSync(executable, args, {
@@ -84,35 +87,52 @@ export class CursorProvider extends AcpProvider {
     supportedModes: ["ask", "plan", "agent"],
   };
   private readonly probe: CursorProbe;
+  private readonly classifier?: CommandClassifier;
   private resolved?: ResolvedCursorLaunch;
 
-  constructor(probe: CursorProbe = new ProcessCursorProbe()) {
+  constructor(probe: CursorProbe = new ProcessCursorProbe(), classifier?: CommandClassifier) {
     super();
     this.probe = probe;
+    this.classifier = classifier;
   }
 
   get executable(): string {
-    return EXECUTABLE;
+    return this.resolved?.executable ?? EXECUTABLE;
   }
 
   discover() {
     const resolved = this.resolve();
     if (!resolved) {
+      const launch = inspectLaunch({
+        args: ["acp"],
+        source: "missing",
+        collisionNames: CURSOR_COLLISIONS,
+        classifier: this.classifier,
+      });
       return {
         provider: this.name,
         available: false,
         executable: EXECUTABLE,
         capabilities: this.capabilities,
-        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`.",
+        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`, and does not follow a user cursor-agent function or alias.",
+        launch,
       };
     }
+    const launch = inspectLaunch({
+      executable: resolved.executable,
+      args: resolved.args,
+      source: "path",
+      collisionNames: CURSOR_COLLISIONS,
+      classifier: this.classifier,
+    });
     return {
       provider: this.name,
       available: true,
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast).`,
+      note: `${selectedLaunchNote(launch)} Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast).`,
+      launch,
     };
   }
 
@@ -131,8 +151,8 @@ export class CursorProvider extends AcpProvider {
 
   listModels(options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
     const env = probeEnvironment(options);
-    const listed = this.probe.run(EXECUTABLE, ["--list-models"], env);
-    const fallback = succeeded(listed) ? listed : this.probe.run(EXECUTABLE, ["models"], env);
+    const listed = this.probe.run(this.probeExecutable(), ["--list-models"], env);
+    const fallback = succeeded(listed) ? listed : this.probe.run(this.probeExecutable(), ["models"], env);
     if (!succeeded(fallback)) {
       return {
         provider: "cursor",
@@ -160,7 +180,7 @@ export class CursorProvider extends AcpProvider {
   }
 
   cliSessionKnownGood(options?: Pick<StartOptions, "envMode" | "envPassthrough">): boolean {
-    const result = this.probe.run(EXECUTABLE, ["status"], probeEnvironment(options));
+    const result = this.probe.run(this.probeExecutable(), ["status"], probeEnvironment(options));
     if (!succeeded(result)) return false;
     const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     if (/not logged in|logged out|unauthenticated/i.test(text)) return false;
@@ -176,15 +196,34 @@ export class CursorProvider extends AcpProvider {
 
   private resolve(): ResolvedCursorLaunch | undefined {
     if (this.resolved) return this.resolved;
-    const version = this.probe.run(EXECUTABLE, ["--version"]);
+    const located = this.locateOfficial();
+    const probeName = located?.source === "env" ? located.executable : EXECUTABLE;
+    const version = this.probe.run(probeName, ["--version"]);
     if (!succeeded(version)) return undefined;
     const args = ["acp"];
-    const help = this.probe.run(EXECUTABLE, [...args, "--help"]);
+    const help = this.probe.run(probeName, [...args, "--help"]);
     if (succeeded(help) && /\bacp\b/i.test(`${help.stdout ?? ""}\n${help.stderr ?? ""}`)) {
-      this.resolved = { executable: EXECUTABLE, args, version: firstLine(version.stdout) };
+      this.resolved = {
+        executable: located?.executable ?? resolveOnPath(EXECUTABLE) ?? EXECUTABLE,
+        args,
+        version: firstLine(version.stdout),
+      };
       return this.resolved;
     }
     return undefined;
+  }
+
+  private locateOfficial() {
+    if (!process.env.CURSOR_AGENT_BIN?.trim()) return undefined;
+    try {
+      return resolveOfficialCli(EXECUTABLE, { envName: "CURSOR_AGENT_BIN" });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private probeExecutable(): string {
+    return this.resolved?.executable ?? this.locateOfficial()?.executable ?? EXECUTABLE;
   }
 }
 

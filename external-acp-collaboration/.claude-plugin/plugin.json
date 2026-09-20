@@ -2,8 +2,8 @@
   "name": "agents-acp",
   "displayName": "Agents ACP",
   "version": "0.2.4-pre.1",
-  "description": "Dispatch scoped tasks from Claude Code to locally installed Cursor CLI or Grok Build ACP agents.",
-  "keywords": ["acp", "cursor", "grok", "dispatch"],
+  "description": "Dispatch scoped tasks from Claude Code to locally installed Cursor CLI, Grok Build, or Antigravity ACP agents.",
+  "keywords": ["acp", "cursor", "grok", "antigravity", "dispatch"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.claude.json"
 }

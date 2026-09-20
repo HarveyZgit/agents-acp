@@ -7,7 +7,7 @@
     {
       "name": "agents-acp",
       "source": "./external-acp-collaboration",
-      "description": "Dispatch scoped tasks to locally installed Cursor CLI or Grok Build ACP agents.",
+      "description": "Dispatch scoped tasks to locally installed Cursor CLI, Grok Build, or Antigravity ACP agents.",
       "version": "0.2.4-pre.1",
       "strict": true
     }

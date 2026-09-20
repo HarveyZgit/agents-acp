@@ -1,6 +1,6 @@
 interface:
   display_name: "Agents ACP dispatch"
-  short_description: "Dispatch a scoped task to Cursor CLI or Grok Build"
+  short_description: "Dispatch a scoped task to Cursor CLI, Grok Build, or Antigravity"
   default_prompt: "Dispatch a scoped review or plan to the configured default ACP agent."
 
 dependencies:

@@ -11,22 +11,54 @@ import {
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
 import { parseListModelsOutput, type EffortLevel, type ModelCatalog } from "../models.ts";
+import { collisionNamesFor, inspectLaunch, resolveOfficialCli, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
+
+const EXECUTABLE = "grok";
+const GROK_ARGS = ["--no-auto-update", "--cwd", "<workspace>", "agent", "--no-leader", "stdio"];
 
 export class GrokProvider extends AcpProvider {
   readonly name: ProviderName = "grok";
-  readonly executable = "grok";
   readonly capabilities: ProviderCapabilities = {
     supportsModelSelection: true,
     modelSelection: "startup",
     supportedModes: ["ask", "plan", "agent"],
   };
+  private readonly classifier?: CommandClassifier;
+
+  constructor(classifier?: CommandClassifier) {
+    super();
+    this.classifier = classifier;
+  }
+
+  get executable(): string {
+    try {
+      return resolveOfficialCli(EXECUTABLE, { envName: "GROK_BIN" })?.executable ?? EXECUTABLE;
+    } catch {
+      return EXECUTABLE;
+    }
+  }
 
   discover(): ProviderAvailability {
     const discovered = super.discover();
-    if (!discovered.available) return discovered;
+    const launch = inspectLaunch({
+      executable: discovered.available ? discovered.executable : undefined,
+      args: GROK_ARGS,
+      source: discovered.available ? "path" : "missing",
+      collisionNames: collisionNamesFor("grok"),
+      classifier: this.classifier,
+    });
+    if (!discovered.available) {
+      return {
+        ...discovered,
+        launch,
+        note: discovered.note
+          ?? "grok was not found as a filesystem executable. A grok shell function or alias is ignored.",
+      };
+    }
     return {
       ...discovered,
-      note: "Model is optional; omit start.model to use the Grok CLI default. Effort is --effort, not a model-id suffix.",
+      launch,
+      note: `${selectedLaunchNote(launch)} Model is optional; omit start.model to use the Grok CLI default. Effort is --effort, not a model-id suffix.`,
     };
   }
 

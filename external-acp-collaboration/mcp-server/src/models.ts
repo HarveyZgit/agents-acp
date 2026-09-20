@@ -3,7 +3,7 @@ import path from "node:path";
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 export type SpeedLevel = "fast" | "standard";
-export type CatalogProvider = "cursor" | "grok";
+export type CatalogProvider = "cursor" | "grok" | "antigravity";
 
 export type CatalogModel = {
   id: string;
@@ -157,9 +157,13 @@ export function resolveModelSelection(
         model: hit.base,
         effort: resolvedEffort ?? parsed.effort,
         speed: resolvedSpeed ?? parsed.speed,
-        launchId: provider === "cursor"
-          ? composeCursorLaunchId(hit.base, resolvedEffort ?? parsed.effort, resolvedSpeed ?? parsed.speed, catalog)
-          : hit.base,
+        launchId: composeLaunchId(
+          provider,
+          hit.base,
+          resolvedEffort ?? parsed.effort,
+          resolvedSpeed ?? parsed.speed,
+          catalog,
+        ),
       };
     }
   }
@@ -183,10 +187,92 @@ export function resolveModelSelection(
     model: preferred.base,
     effort: resolvedEffort,
     speed: resolvedSpeed,
-    launchId: provider === "cursor"
-      ? composeCursorLaunchId(preferred.base, resolvedEffort, resolvedSpeed, catalog)
-      : preferred.base,
+    launchId: composeLaunchId(provider, preferred.base, resolvedEffort, resolvedSpeed, catalog),
   };
+}
+
+export function composeLaunchId(
+  provider: CatalogProvider,
+  base: string,
+  effort?: EffortLevel,
+  speed?: SpeedLevel,
+  catalog: CatalogModel[] = [],
+): string {
+  if (provider === "cursor") return composeCursorLaunchId(base, effort, speed, catalog);
+  if (provider === "antigravity") return composeAntigravityLaunchId(base, effort, catalog);
+  return parseCatalogId(base).base;
+}
+
+export function composeAntigravityLaunchId(
+  base: string,
+  effort?: EffortLevel,
+  catalog: CatalogModel[] = [],
+): string {
+  const parsed = parseCatalogId(base.trim());
+  const resolvedBase = parsed.base;
+  const resolvedEffort = effort ?? parsed.effort;
+  const ids = candidateEffortIds(resolvedBase, resolvedEffort);
+  if (catalog.length > 0) {
+    const available = new Set(catalog.map((model) => model.id));
+    const hit = ids.find((id) => available.has(id) && matchesRequestedEffort(id, resolvedEffort));
+    if (hit) return hit;
+    const sameBase = catalog.filter((model) => model.base === resolvedBase);
+    const byParams = sameBase.find((model) => resolvedEffort === undefined || model.effort === resolvedEffort);
+    if (byParams) return byParams.id;
+    if (resolvedEffort) {
+      throw new Error(`No antigravity catalog model matches "${resolvedBase}" with effort ${resolvedEffort}.`);
+    }
+    if (sameBase[0]) return sameBase[0].id;
+    throw new Error(`No antigravity catalog model matches "${resolvedBase}".`);
+  }
+  return ids[0] ?? resolvedBase;
+}
+
+export function parseSessionModels(session: Record<string, unknown>): CatalogModel[] {
+  const models = session.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    const available = (models as { availableModels?: unknown }).availableModels;
+    if (Array.isArray(available)) {
+      const parsed = available.flatMap((entry) => sessionModelRow(entry));
+      if (parsed.length > 0) return parsed;
+    }
+  }
+  const configOptions = Array.isArray(session.configOptions) ? session.configOptions : [];
+  const modelOption = configOptions.find((option) => (
+    option !== null && typeof option === "object" && (option as { category?: unknown }).category === "model"
+  )) as { options?: unknown } | undefined;
+  if (Array.isArray(modelOption?.options)) {
+    return modelOption.options.flatMap((option) => {
+      if (!option || typeof option !== "object") return [];
+      const row = option as { value?: unknown; name?: unknown };
+      if (typeof row.value !== "string" || !looksLikeModelId(row.value)) return [];
+      return [parseCatalogId(row.value, typeof row.name === "string" ? row.name : row.value)];
+    });
+  }
+  return [];
+}
+
+export function currentSessionModel(session: Record<string, unknown>): string | undefined {
+  const models = session.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    const current = (models as { currentModelId?: unknown }).currentModelId;
+    if (typeof current === "string" && looksLikeModelId(current)) return current;
+  }
+  const configOptions = Array.isArray(session.configOptions) ? session.configOptions : [];
+  const modelOption = configOptions.find((option) => (
+    option !== null && typeof option === "object" && (option as { category?: unknown }).category === "model"
+  )) as { currentValue?: unknown } | undefined;
+  return typeof modelOption?.currentValue === "string" && looksLikeModelId(modelOption.currentValue)
+    ? modelOption.currentValue
+    : undefined;
+}
+
+function sessionModelRow(entry: unknown): CatalogModel[] {
+  if (!entry || typeof entry !== "object") return [];
+  const row = entry as { modelId?: unknown; id?: unknown; name?: unknown };
+  const id = typeof row.modelId === "string" ? row.modelId : typeof row.id === "string" ? row.id : undefined;
+  if (!id || !looksLikeModelId(id)) return [];
+  return [parseCatalogId(id, typeof row.name === "string" ? row.name : id)];
 }
 
 export function composeCursorLaunchId(
@@ -252,6 +338,18 @@ function candidateCursorIds(base: string, effort?: EffortLevel, speed?: SpeedLev
   if (effort) ids.push(`${base}-${effort}`);
   ids.push(base);
   return [...new Set(ids)];
+}
+
+function candidateEffortIds(base: string, effort?: EffortLevel): string[] {
+  const ids: string[] = [];
+  if (effort) ids.push(`${base}-${effort}`);
+  ids.push(base);
+  return [...new Set(ids)];
+}
+
+function matchesRequestedEffort(id: string, effort?: EffortLevel): boolean {
+  if (!effort) return true;
+  return parseCatalogId(id).effort === effort;
 }
 
 function rankCatalog(catalog: CatalogModel[], query: string): CatalogModel[] {

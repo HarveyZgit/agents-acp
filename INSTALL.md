@@ -1,7 +1,8 @@
 # Installing agents-acp 0.2.4-pre.1
 
 The same plugin directory installs into **Codex** or **Claude Code**. Both
-hosts call the same MCP server and dispatch to local Cursor CLI / Grok Build.
+hosts call the same MCP server and dispatch to local Cursor CLI, Grok Build,
+or Antigravity ACP.
 
 ## Preconditions
 
@@ -10,8 +11,15 @@ hosts call the same MCP server and dispatch to local Cursor CLI / Grok Build.
 - Codex (`codex plugin marketplace`) and/or Claude Code (`claude plugin` /
   `/plugin`).
 - Optionally, an already installed and already authenticated Cursor CLI
-  (`cursor-agent`) and/or Grok Build CLI (`grok`). Do not install or
-  authenticate a provider just to use this plugin.
+  (`cursor-agent`), Grok Build CLI (`grok`), and/or official Antigravity
+  ACP server (`agy_acp_server.par` / `antigravity-acp`, or `AGY_ACP_BIN`).
+  Do not wrap the `agy` TUI. Do not install or authenticate a provider just
+  to use this plugin. `$config` reads rc files as text (never sources them)
+  and confirms the official filesystem binary for every CLI agent
+  (`cursor-agent`, `grok`, `agy_acp_server.par`). User functions/aliases
+  that check the network first are reported and not followed. Pin with
+  `CURSOR_AGENT_BIN` / `GROK_BIN` / `AGY_ACP_BIN` if a PATH script would
+  otherwise win.
 
 ## 1. Configure the workspace boundary
 
@@ -52,7 +60,7 @@ Fields:
 | Field | Meaning |
 | --- | --- |
 | `workspace` | Required before `start`. The only root in which providers may be started. |
-| `defaultProvider` | `cursor` or `grok`. Set by `configure` or named in a user prompt. |
+| `defaultProvider` | `cursor`, `grok`, or `antigravity`. Set by `configure` or named in a user prompt. `agy` is accepted as an alias and stored as `antigravity`. |
 | `defaultModel` | Catalog model id resolved from a user keyword. Never store the raw keyword. |
 | `defaultEffort` | Reasoning effort (`low` / `medium` / `high` / `xhigh` / `max`). High is `high`. |
 | `defaultSpeed` | Cursor speed: `fast` or `standard`. Fast is `fast`. |
@@ -76,7 +84,8 @@ they exist in its own environment, and they override the config file:
 `EXTERNAL_ACP_ENV_MODE`, `EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH`, and the
 provider/session variables (`HOME`, `PATH`, `SHELL`, `SSH_AUTH_SOCK`,
 `SECURITYSESSIONID`, `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`,
-`AGENT_CLI_CREDENTIAL_STORE`, `XAI_API_KEY`, …).
+`AGENT_CLI_CREDENTIAL_STORE`, `XAI_API_KEY`, `CURSOR_AGENT_BIN`, `GROK_BIN`, `AGY_ACP_BIN`,
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, …).
 Never put secret values in the plugin manifest; `env_vars` forwards names only.
 
 ## 2. Install the plugin
@@ -133,6 +142,7 @@ cursor-agent acp --help
 cursor-agent status
 grok --version
 grok agent --help
+ls "${AGY_ACP_BIN:-$HOME/.local/bin/agy_acp_server.par}"
 
 cd external-acp-collaboration/mcp-server
 npm test
@@ -157,7 +167,7 @@ offered option IDs, rejection of an unoffered option, an approved response,
 completion with `stopReason: "end_turn"`, resume through `session/load`,
 cancellation, survival of a stale run-store lock, the blocked `implement` gate,
 and termination of provider process groups when the transport closes. It
-requires no Codex login and no Cursor/Grok binaries.
+requires no Codex login and no Cursor, Grok, or Antigravity binaries.
 
 In Codex, then:
 
@@ -174,7 +184,8 @@ In Codex, then:
 3. `start` with `mode: "review"` and a harmless prompt. After configure,
    `provider` and `model` may be omitted. `cwd` must be inside `workspace`.
    To override one run, pass `provider: "cursor"` and/or
-   `model: "composer-2.5"`.
+   `model: "composer-2.5"`, or `provider: "antigravity"` with a Gemini
+   keyword after a fixture or first session catalog is available.
 4. `status` while it runs, then `result` when it finishes.
 
 If a permission appears, `status` lists its `requestId` and the provider's
@@ -209,6 +220,19 @@ user login where interactive `grok` works, keep the workspace readable, and
 keep `~/.grok` writable. A `Permission denied` at `session/new` is expanded to
 name those workspace and session-file checks; it is not treated as a missing
 login when a CLI session already exists. Never pass `--always-approve`.
+
+### If Antigravity is missing or unauthenticated
+
+Use Google's official ACP server only (`agy_acp_server.par` or
+`antigravity-acp`). Set `AGY_ACP_BIN` to that file. The plugin refuses
+the `agy` TUI and community stdio shims. Login lives under
+`~/.gemini/antigravity-acp/` (`acp_token.json`, `settings.json`) or
+`GEMINI_API_KEY` / `GOOGLE_API_KEY`. Headless `oauth-personal` does not
+print a URL in a Codex/Claude child — log in from the Antigravity IDE or
+Zed first. Models arrive on `session/new` and are switched with
+`session/set_config_option` `{configId:"model"}`. Session modes stay on
+`default`; `yolo` and `auto_edit` are never selected. `session/cancel` is
+missing on current RC builds, so cancel is process-group kill.
 
 ## 4. Optional write mode
 

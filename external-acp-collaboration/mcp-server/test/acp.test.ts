@@ -290,9 +290,43 @@ test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   const provider = availableCursor();
   const discovery = provider.discover();
   assert.equal(discovery.available, true);
-  assert.equal(discovery.executable, "cursor-agent");
-  assert.match(discovery.note ?? "", /cursor-agent acp/);
+  assert.equal(discovery.executable.endsWith("cursor-agent"), true);
+  assert.match(discovery.note ?? "", /cursor-agent acp|shell:false/);
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.deepEqual(discovery.launch?.args, ["acp"]);
   assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
+});
+
+test("Cursor setup reports a cursor-agent function and does not follow cursor/agent", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent --version": { status: 0, stdout: "1.2.3\n" },
+    "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
+  }), {
+    classify: (name) => (
+      name === "cursor-agent" || name === "cursor" || name === "agent"
+        ? { kind: "function" }
+        : undefined
+    ),
+  });
+  const discovery = provider.discover();
+  assert.equal(discovery.available, true);
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.deepEqual(discovery.launch?.args, ["acp"]);
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "cursor-agent" && item.kind === "function" && item.followed === false));
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "cursor" && item.kind === "function"));
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "agent" && item.kind === "function"));
+  assert.match(discovery.note ?? "", /Ignored user wrappers: cursor-agent/);
+  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
+});
+
+test("Grok setup reports a grok function and still uses the filesystem executable", () => {
+  const provider = new GrokProvider({
+    classify: (name) => name === "grok" ? { kind: "function" } : undefined,
+  });
+  const discovery = provider.discover();
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "grok" && item.kind === "function" && item.followed === false));
+  assert.equal(discovery.launch?.args.includes("stdio"), true);
 });
 
 test("Cursor discovery does not fall back to cursor or agent", () => {
@@ -371,6 +405,11 @@ type MockOptions = {
   stderrOnRejected?: string;
   loadSession?: boolean;
   driftToMode?: string;
+  modelSelection?: ProviderCapabilities["modelSelection"];
+  acceptableModes?: string[];
+  sessionModels?: unknown;
+  currentModel?: string;
+  decoratePromptPrefix?: string;
   outsideWorkspaceWrite?: boolean;
   protocolVersion?: unknown;
   name?: ProviderName;
@@ -384,11 +423,7 @@ type MockOptions = {
 class MockProvider extends AcpProvider {
   readonly name: ProviderName;
   readonly executable = "mock-grok";
-  readonly capabilities: ProviderCapabilities = {
-    supportsModelSelection: true,
-    modelSelection: "startup",
-    supportedModes: ["ask", "plan", "agent"],
-  };
+  readonly capabilities: ProviderCapabilities;
   readonly transport = new FakeTransport();
   private readonly options: MockOptions;
   private authenticated: boolean;
@@ -400,6 +435,21 @@ class MockProvider extends AcpProvider {
     this.options = options;
     this.name = options.name ?? "grok";
     this.authenticated = options.requireAuth !== true;
+    this.capabilities = {
+      supportsModelSelection: true,
+      modelSelection: options.modelSelection ?? "startup",
+      supportedModes: ["ask", "plan", "agent"],
+    };
+  }
+
+  override acceptableSessionModes(mode: import("../src/acp/provider.ts").TaskMode): string[] {
+    return this.options.acceptableModes ?? super.acceptableSessionModes(mode);
+  }
+
+  override decoratePrompt(mode: import("../src/acp/provider.ts").TaskMode, prompt: string): string {
+    return this.options.decoratePromptPrefix
+      ? `${this.options.decoratePromptPrefix}${prompt}`
+      : super.decoratePrompt(mode, prompt);
   }
 
   command(): string[] {
@@ -488,6 +538,9 @@ class MockProvider extends AcpProvider {
           result: {
             sessionId: "mock-session",
             modes: this.options.modes ?? { currentModeId: "agent", availableModes: [{ id: "ask" }, { id: "plan" }, { id: "agent" }] },
+            models: this.options.sessionModels
+              ? { availableModels: this.options.sessionModels, currentModelId: this.options.currentModel }
+              : undefined,
           },
         });
         return;
@@ -1028,6 +1081,64 @@ test("authenticate failures include only safe advertised auth method summaries",
   assert.match(error, /Advertised auth methods: cursor_login:agent/);
   assert.equal(error.includes("hidden-value"), false);
   assert.equal(/please login first|cursor-agent login/i.test(error), false);
+});
+
+test("Antigravity stays on default, sets the session model, and never selects yolo", async () => {
+  const provider = new MockProvider({
+    name: "antigravity",
+    stopReason: "end_turn",
+    modelSelection: "session",
+    acceptableModes: ["default"],
+    decoratePromptPrefix: "PLAN-ONLY\n",
+    modes: {
+      currentModeId: "yolo",
+      availableModes: [{ id: "default" }, { id: "auto_edit" }, { id: "yolo" }],
+    },
+    sessionModels: [
+      { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+      { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+    ],
+    currentModel: "gemini-3.8-flash-low",
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({
+    provider: "antigravity",
+    cwd: workspace,
+    prompt: "ship it",
+    mode: "plan",
+    model: "gemini-3.8-flash",
+    effort: "high",
+  });
+  await settle();
+  assert.equal(controller.result(run.id).status, "completed");
+  const mode = provider.transport.sent("session/set_mode")[0]
+    ?? provider.transport.sent("session/set_config_option").find((message) => message.params?.configId === "mode");
+  assert.ok(mode, "must leave yolo");
+  const modeValue = mode.params?.modeId ?? mode.params?.value;
+  assert.equal(modeValue, "default");
+  assert.equal(modeValue === "yolo" || modeValue === "auto_edit", false);
+  const model = provider.transport.sent("session/set_config_option").find((message) => message.params?.configId === "model");
+  assert.deepEqual(model?.params, { sessionId: "mock-session", configId: "model", value: "gemini-3.8-flash-high" });
+  const prompt = provider.transport.sent("session/prompt")[0];
+  assert.match(JSON.stringify(prompt.params?.prompt), /PLAN-ONLY/);
+  assert.equal(JSON.stringify(prompt.params?.prompt).includes("ship it"), true);
+});
+
+test("Antigravity aborts if the session drifts to yolo", async () => {
+  const provider = new MockProvider({
+    name: "antigravity",
+    acceptableModes: ["default"],
+    modes: {
+      currentModeId: "default",
+      availableModes: [{ id: "default" }, { id: "yolo" }],
+    },
+    driftToMode: "yolo",
+  });
+  const { workspace, controller } = controllerFor(provider);
+  const run = controller.start({ provider: "antigravity", cwd: workspace, prompt: "task", mode: "review" });
+  await settle();
+  assert.equal(controller.result(run.id).status, "failed");
+  assert.match(String(controller.result(run.id).error), /yolo/);
 });
 
 test("controller terminates an ACP run that exceeds its configured lifetime", async () => {

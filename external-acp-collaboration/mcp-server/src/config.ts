@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { safeEffort, safeSpeed, storedModelParts, type EffortLevel, type SpeedLevel } from "./models.ts";
 
 export type EnvMode = "session" | "inherit" | "minimal";
-export type DefaultProviderName = "cursor" | "grok";
+export type DefaultProviderName = "cursor" | "grok" | "antigravity";
 export type HostKind = "claude" | "codex";
 
 export type PluginConfig = {
@@ -31,7 +31,7 @@ export type PluginConfig = {
 
 export type ConfigureRequest = {
   workspace?: string;
-  defaultProvider?: DefaultProviderName;
+  defaultProvider?: DefaultProviderName | "agy";
   defaultModel?: string | null;
   defaultEffort?: EffortLevel | null;
   defaultSpeed?: SpeedLevel | null;
@@ -140,7 +140,7 @@ export function persistConfig(updates: ConfigureRequest, env: NodeJS.ProcessEnv 
   if (updates.workspace !== undefined) next.workspace = existingDirectory(updates.workspace);
   if (updates.defaultProvider !== undefined) {
     const provider = providerName(updates.defaultProvider);
-    if (!provider) throw new Error('defaultProvider must be "cursor" or "grok".');
+    if (!provider) throw new Error('defaultProvider must be "cursor", "grok", or "antigravity".');
     next.defaultProvider = provider;
   }
   if (updates.defaultModel !== undefined) {
@@ -238,7 +238,8 @@ function existingDirectory(value: string): string {
   return resolved;
 }
 
-function providerName(value: unknown): DefaultProviderName | undefined {
+export function providerName(value: unknown): DefaultProviderName | undefined {
+  if (value === "agy" || value === "antigravity") return "antigravity";
   return value === "cursor" || value === "grok" ? value : undefined;
 }
 

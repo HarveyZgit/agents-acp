@@ -1,10 +1,11 @@
 import readline from "node:readline";
-import { loadConfig, persistConfig, type PluginConfig } from "./config.ts";
+import { loadConfig, persistConfig, providerName, type DefaultProviderName, type PluginConfig } from "./config.ts";
 import {
-  composeCursorLaunchId,
+  composeLaunchId,
   resolveModelSelection,
   safeEffort,
   safeSpeed,
+  type CatalogProvider,
   type EffortLevel,
   type ModelCatalog,
   type SpeedLevel,
@@ -58,7 +59,7 @@ const tools = [
     type: "object",
     properties: {},
   }),
-  tool("get_config", "Return centralized runtime paths, defaults, and setup questions. Does not write project-local files.", {
+  tool("get_config", "Return centralized runtime paths, defaults, setup questions, and confirmed official spawn argv for every CLI agent (cursor-agent, grok, Antigravity). Reports user command wrappers (functions, aliases, colliding PATH files) that will not be followed. Does not write project-local files.", {
     type: "object",
     properties: {
       suggestedWorkspace: {
@@ -72,7 +73,7 @@ const tools = [
     required: ["userConfirmed"],
     properties: {
       workspace: { type: "string", description: "Absolute workspace root." },
-      defaultProvider: { type: "string", enum: ["cursor", "grok"] },
+      defaultProvider: { type: "string", enum: ["cursor", "grok", "antigravity", "agy"] },
       defaultModel: {
         type: "string",
         description: "User keyword or catalog id. Resolved against the agent model list; the raw keyword is never stored. Empty string clears model, effort, and speed.",
@@ -98,7 +99,7 @@ const tools = [
     type: "object",
     required: ["cwd", "prompt", "mode"],
     properties: {
-      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
+      provider: { type: "string", enum: ["cursor", "grok", "antigravity", "fake"] },
       cwd: { type: "string" },
       prompt: { type: "string", description: "Sent only to the provider process and never persisted." },
       mode: { type: "string", enum: ["review", "plan", "implement"] },
@@ -126,7 +127,7 @@ const tools = [
     required: ["followUp"],
     properties: {
       runId: { type: "string" },
-      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
+      provider: { type: "string", enum: ["cursor", "grok", "antigravity", "fake"] },
       sessionId: { type: "string" },
       followUp: { type: "string", description: "Sent only to the provider process and never persisted." },
       allowImplement: { type: "boolean" },
@@ -211,7 +212,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
         serverInfo: { name: "agents-acp", version: SERVER_VERSION },
-        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
+        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Report providers[].launch and confirmedLaunch for every CLI agent (cursor-agent, grok, agy_acp_server.par): spawn the official argv with shell:false and never invoke ignoredWrappers such as a cursor-agent, grok, or agy function. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -293,7 +294,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
         requireWorkspaceConfiguration();
         result = controller.resume({
           runId: optionalString(args.runId, "runId", 128),
-          provider: args.provider === undefined ? undefined : stringEnum(args.provider, ["cursor", "grok", "fake"]),
+          provider: args.provider === undefined ? undefined : requiredStartProvider(args.provider),
           sessionId: optionalString(args.sessionId, "sessionId", 512),
           followUp: requiredString(args.followUp, "followUp", 65_536),
           allowImplement: args.allowImplement === true,
@@ -459,33 +460,48 @@ function configSnapshot(suggestedWorkspace?: string) {
     provider: provider.provider,
     available: provider.available,
     version: provider.version,
+    executable: provider.executable,
     note: provider.note,
+    launch: provider.launch,
   }));
   const catalogs = controller.listModels();
   const snapshot = publicConfig(config, catalogs);
+  const questions = snapshot.needsSetup
+    ? [
+      {
+        id: "defaultProvider",
+        prompt: "Which ACP agent should be the default?",
+        options: [
+          { id: "cursor", label: "Cursor CLI (cursor-agent)" },
+          { id: "grok", label: "Grok Build (grok)" },
+          { id: "antigravity", label: "Antigravity ACP (agy_acp_server.par)" },
+        ],
+      },
+      ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
+      {
+        id: "workspace",
+        prompt: "Absolute workspace root the provider may run in.",
+        suggested: suggestedWorkspace,
+        optional: Boolean(config.workspace),
+      },
+    ]
+    : modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider));
   return {
     ...snapshot,
     providers,
     catalogs,
-    setupQuestions: snapshot.needsSetup
-      ? [
-        {
-          id: "defaultProvider",
-          prompt: "Which ACP agent should be the default?",
-          options: [
-            { id: "cursor", label: "Cursor CLI (cursor-agent)" },
-            { id: "grok", label: "Grok Build (grok)" },
-          ],
-        },
-        ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
-        {
-          id: "workspace",
-          prompt: "Absolute workspace root the provider may run in.",
-          suggested: suggestedWorkspace,
-          optional: Boolean(config.workspace),
-        },
-      ]
-      : modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
+    setupQuestions: [...questions, launchSetupQuestion(providers)],
+  };
+}
+
+function launchSetupQuestion(providers: Array<{ provider: string; launch?: { argv?: string; ignoredWrappers?: unknown[] } }>) {
+  return {
+    id: "confirmedLaunch",
+    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}) for every CLI agent. Wrapper detection is rc-scan: rc files are read as text and never sourced. Report each provider launch to the user. Do not invoke ignoredWrappers from the host shell — a user cursor-agent, grok, or agy function that checks the network first is detected and never followed.",
+    readOnly: true,
+    launches: providers.flatMap((provider) => (
+      provider.launch ? [{ provider: provider.provider, ...provider.launch }] : []
+    )),
   };
 }
 
@@ -493,13 +509,13 @@ function applyConfigure(args: Record<string, unknown>) {
   const previousWorkspace = config.workspace;
   const provider = args.defaultProvider === undefined
     ? config.defaultProvider
-    : stringEnum(args.defaultProvider, ["cursor", "grok"]);
+    : requiredConfiguredProvider(args.defaultProvider);
   const resolved = resolveConfigureSelection(provider, args);
   const next = persistConfig({
     workspace: optionalString(args.workspace, "workspace", 4_096),
     defaultProvider: args.defaultProvider === undefined
       ? undefined
-      : stringEnum(args.defaultProvider, ["cursor", "grok"]),
+      : requiredConfiguredProvider(args.defaultProvider),
     defaultModel: resolved.model,
     defaultEffort: resolved.effort,
     defaultSpeed: resolved.speed,
@@ -517,9 +533,9 @@ function applyConfigure(args: Record<string, unknown>) {
   };
 }
 
-function resolveStartProvider(value: unknown): "cursor" | "grok" | "fake" {
+function resolveStartProvider(value: unknown): "cursor" | "grok" | "antigravity" | "fake" {
   if (value !== undefined) {
-    const provider = stringEnum(value, ["cursor", "grok", "fake"]);
+    const provider = requiredStartProvider(value);
     if (provider === "fake" && !config.enableFake) throw new Error("The fake provider is disabled.");
     return provider;
   }
@@ -535,23 +551,24 @@ function resolveStartSelection(
 ): { model?: string; effort?: EffortLevel; speed?: SpeedLevel } {
   const provider = providerValue === undefined
     ? config.defaultProvider
-    : stringEnum(providerValue, ["cursor", "grok", "fake"]);
+    : requiredStartProvider(providerValue);
   const useStored = provider === config.defaultProvider;
   const explicitModel = optionalString(modelValue, "model", 256);
   const effort = effortValue === undefined ? (useStored ? config.defaultEffort : undefined) : optionalEnum(safeEffort(effortValue));
   const speed = speedValue === undefined ? (useStored ? config.defaultSpeed : undefined) : optionalEnum(safeSpeed(speedValue));
   if (explicitModel !== undefined) {
-    const catalog = provider === "cursor" || provider === "grok"
+    const catalogProvider = catalogProviderName(provider);
+    const catalog = catalogProvider
       ? controller.listModels(provider)[0]?.models ?? []
       : [];
-    const resolved = resolveModelSelection(catalog, explicitModel, effort, speed, provider === "grok" ? "grok" : "cursor");
+    const resolved = resolveModelSelection(catalog, explicitModel, effort, speed, catalogProvider ?? "cursor");
     return { model: resolved?.model, effort: resolved?.effort, speed: resolved?.speed };
   }
   if (!useStored) return { effort, speed };
   return { model: config.defaultModel, effort, speed };
 }
 
-function resolveConfigureSelection(provider: "cursor" | "grok" | undefined, args: Record<string, unknown>) {
+function resolveConfigureSelection(provider: DefaultProviderName | undefined, args: Record<string, unknown>) {
   const clearingModel = args.defaultModel === "" || args.defaultModel === null;
   if (clearingModel) {
     return { model: null, effort: null, speed: null, launchId: undefined as string | undefined };
@@ -589,13 +606,28 @@ function resolveConfigureSelection(provider: "cursor" | "grok" | undefined, args
 }
 
 function launchModelFor(
-  provider: "cursor" | "grok",
+  provider: DefaultProviderName,
   model: string,
   effort?: EffortLevel,
   speed?: SpeedLevel,
   catalog: ModelCatalog["models"] = [],
 ): string {
-  return provider === "cursor" ? composeCursorLaunchId(model, effort, speed, catalog) : model;
+  return composeLaunchId(provider, model, effort, speed, catalog);
+}
+
+function requiredConfiguredProvider(value: unknown): DefaultProviderName {
+  const provider = providerName(value);
+  if (!provider) throw new Error('defaultProvider must be "cursor", "grok", or "antigravity".');
+  return provider;
+}
+
+function requiredStartProvider(value: unknown): "cursor" | "grok" | "antigravity" | "fake" {
+  if (value === "fake") return "fake";
+  return requiredConfiguredProvider(value);
+}
+
+function catalogProviderName(value: string | undefined): CatalogProvider | undefined {
+  return value === "cursor" || value === "grok" || value === "antigravity" ? value : undefined;
 }
 
 function modelSetupQuestions(catalog?: ModelCatalog) {
@@ -603,7 +635,7 @@ function modelSetupQuestions(catalog?: ModelCatalog) {
     .filter((model, index, all) => all.findIndex((entry) => entry.base === model.base) === index)
     .slice(0, 40)
     .map((model) => ({ id: model.base, label: `${model.label} (${model.base})` }));
-  return [
+  const questions = [
     {
       id: "defaultModel",
       prompt: "Default model keyword or catalog id. The skill must resolve this against the agent model list and persist the catalog id, never the raw keyword.",
@@ -622,9 +654,13 @@ function modelSetupQuestions(catalog?: ModelCatalog) {
         { id: "max", label: "max" },
       ],
     },
+  ];
+  if (catalog?.provider === "antigravity") return questions;
+  return [
+    ...questions,
     {
       id: "defaultSpeed",
-      prompt: "Speed (Fast). Persist separately. Cursor composes this into the launch model id.",
+      prompt: "Speed (Fast). Persist separately. Cursor composes this into the launch model id. Antigravity has no Fast dimension.",
       optional: true,
       options: [
         { id: "fast", label: "Fast" },

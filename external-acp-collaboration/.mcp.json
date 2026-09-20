@@ -55,7 +55,14 @@
         "CURSOR_CONFIG_DIR",
         "AGENT_CLI_CREDENTIAL_STORE",
         "XAI_API_KEY",
-        "GROK_CONFIG_DIR"
+        "GROK_CONFIG_DIR",
+        "CURSOR_AGENT_BIN",
+        "GROK_BIN",
+        "AGY_ACP_BIN",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION"
       ]
     }
   }

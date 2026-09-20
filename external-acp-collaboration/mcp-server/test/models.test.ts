@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  composeAntigravityLaunchId,
   composeCursorLaunchId,
+  currentSessionModel,
   extractQualifiers,
   parseCatalogId,
   parseListModelsOutput,
+  parseSessionModels,
   resolveModelSelection,
   storedModelParts,
 } from "../src/models.ts";
@@ -92,6 +95,46 @@ test("composes Cursor launch ids from stored base + effort + speed", () => {
   assert.equal(composeCursorLaunchId("composer-2.5-high-fast"), "composer-2.5-high-fast");
   const suffixOnly = parseListModelsOutput("composer-2.5-high-fast - Composer 2.5 High Fast\n");
   assert.equal(composeCursorLaunchId("composer-2.5", undefined, undefined, suffixOnly), "composer-2.5-high-fast");
+});
+
+test("composes Antigravity Gemini slugs from base + effort", () => {
+  const catalog = parseListModelsOutput(`
+gemini-3.8-flash-high - Gemini 3.8 Flash (High)
+gemini-3.8-flash-medium - Gemini 3.8 Flash (Medium)
+gemini-3.8-flash-low - Gemini 3.8 Flash (Low)
+gemini-pro-agent - Gemini 3.1 Pro (High)
+`);
+  assert.equal(composeAntigravityLaunchId("gemini-3.8-flash", "high", catalog), "gemini-3.8-flash-high");
+  assert.equal(composeAntigravityLaunchId("gemini-3.8-flash-high", "high", catalog), "gemini-3.8-flash-high");
+  const resolved = resolveModelSelection(catalog, "flash", "high", undefined, "antigravity");
+  assert.equal(resolved?.model, "gemini-3.8-flash");
+  assert.equal(resolved?.effort, "high");
+  assert.equal(resolved?.launchId, "gemini-3.8-flash-high");
+  assert.throws(() => resolveModelSelection([], "flash", "high", undefined, "antigravity"), /catalog is unavailable/);
+  assert.throws(
+    () => composeAntigravityLaunchId("gemini-3.8-flash", "high", parseListModelsOutput("gemini-3.8-flash - Gemini 3.8 Flash\n")),
+    /effort high/,
+  );
+  assert.throws(
+    () => composeAntigravityLaunchId("gemini-3.8-flash", "high", parseListModelsOutput("gemini-3.8-flash-low - Gemini 3.8 Flash (Low)\n")),
+    /effort high/,
+  );
+});
+
+test("parses Antigravity session/new model catalog", () => {
+  const session = {
+    models: {
+      currentModelId: "gemini-3.7-flash-high",
+      availableModels: [
+        { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+        { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+      ],
+    },
+  };
+  const models = parseSessionModels(session);
+  assert.equal(models[0]?.base, "gemini-3.8-flash");
+  assert.equal(models[0]?.effort, "high");
+  assert.equal(currentSessionModel(session), "gemini-3.7-flash-high");
 });
 
 test("storedModelParts strips launch suffixes and rejects raw keywords", () => {

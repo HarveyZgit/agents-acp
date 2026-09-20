@@ -4,8 +4,9 @@ Current packaged version: **0.2.4-pre.1**.
 
 `agents-acp` is a Codex and Claude Code plugin that delegates a scoped task
 to a locally installed ACP-capable coding agent. The adapters target Grok
-Build (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`)
-and Cursor CLI (`cursor-agent acp`).
+Build (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`),
+Cursor CLI (`cursor-agent acp`), and Antigravity
+(`agy_acp_server.par --uid=`).
 
 Cursor uses only the official `cursor-agent` binary. It never invokes `cursor`
 (the desktop launcher on many machines) and never invokes a bare `agent`,
@@ -21,8 +22,15 @@ newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
 `completed` events.
 
 `external-acp-collaboration/mcp-server/src/acp/provider.ts` owns shared ACP
-transport and lifecycle behavior. `cursor.ts` and `grok.ts` contain only
-provider-specific executable, authentication, model, and launch details.
+transport and lifecycle behavior. `cursor.ts`, `grok.ts`, and
+`antigravity.ts` contain only provider-specific executable, authentication,
+model, and launch details. Antigravity never wraps the `agy` TUI.
+`$config` inspects every CLI agent (`cursor-agent`, `grok`,
+`agy_acp_server.par`) and reports the exact spawn argv (`shell:false`).
+User rc files are **read as text**, never sourced. Functions/aliases that
+check the network first are `ignoredWrappers` and are not followed. Pin
+the official file with `CURSOR_AGENT_BIN` / `GROK_BIN` / `AGY_ACP_BIN`
+when a same-name PATH script would otherwise win.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
 and changed-file summaries. It never writes task prompts, credentials, or
@@ -33,7 +41,7 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | Tool | Purpose |
 | --- | --- |
 | `list_providers` | Discovered providers, resolved ACP command, centralized config path, and defaults |
-| `get_config` | Runtime dir, defaults, catalogs, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
+| `get_config` | Runtime dir, defaults, catalogs, `needsSetup`, setup questions, and confirmed official spawn argv. Reports user wrappers that will not be followed. Never writes a project-local `.agents-acp` |
 | `configure` | Persist default provider, catalog model id, effort (High), speed (Fast), and workspace. Resolves keywords against the agent model list |
 | `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model`/`effort`/`speed` may be omitted after configure |
 | `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |
@@ -73,8 +81,10 @@ are `/agents-acp:config` and `/agents-acp:dispatch`.
   `session/new` is expanded to name workspace and provider-session file access.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
-  `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,
-  `plan` requires `plan` or `ask`, and `implement` requires `agent`. If no
+  `configOptions` of `category: "mode"`.   `review` requires `ask` or `plan`,
+  `plan` requires `plan` or `ask`, and `implement` requires `agent`. Antigravity
+  is different: its modes are permission policy (`default` / `auto_edit` /
+  `yolo`). Every agents-acp task stays on `default`. Never `yolo`. If no
   acceptable mode can be confirmed, the run **fails closed** rather than
   running a read-only request in a write-capable default mode.
 - `session/prompt` has no fixed request timeout. A prompt turn is bounded by
@@ -128,11 +138,15 @@ are `/agents-acp:config` and `/agents-acp:dispatch`.
 
 After `configure`, `start` may omit `provider`, `model`, `effort`, and `speed`
 and uses the stored defaults. Pass those fields only to override that run.
-`$config` resolves a user keyword against `cursor-agent --list-models` or
-`grok models` and stores the catalog id, never the raw text. Fast is
-`defaultSpeed` and High is `defaultEffort`. Cursor composes them into the
-launch id (`composer-2.5-high-fast`); Grok passes `--model` plus `--effort`.
-Model values are a single argv element and never concatenated into a prompt.
+`$config` resolves a user keyword against `cursor-agent --list-models`,
+`grok models`, or the Antigravity session catalog (or
+`EXTERNAL_ACP_CATALOG_FIXTURE`) and stores the catalog id, never the raw
+text. Fast is `defaultSpeed` and High is `defaultEffort`. Cursor composes
+them into the launch id (`composer-2.5-high-fast`); Grok passes `--model`
+plus `--effort`; Antigravity sets `session/set_config_option` to a Gemini
+slug such as `gemini-3.8-flash-high`. Model values are a single argv
+element (Cursor/Grok) or an in-session config value (Antigravity) and
+never concatenated into a prompt.
 
 ## Installation
 
@@ -188,6 +202,8 @@ cursor-agent acp --help
 cursor-agent status
 grok --version
 grok agent --help
+# optional: official Antigravity ACP server, never the agy TUI
+ls "${AGY_ACP_BIN:-$HOME/.local/bin/agy_acp_server.par}"
 
 cd external-acp-collaboration/mcp-server
 npm test
@@ -195,8 +211,8 @@ npm run smoke:main
 ```
 
 `npm run smoke:main` exercises the full MCP flow against a bundled fake ACP
-agent that speaks documented ACP shapes. It needs no Codex login and no Cursor
-or Grok binaries.
+agent that speaks documented ACP shapes. It needs no Codex login and no Cursor,
+Grok, or Antigravity binaries.
 
 ## Verification boundaries
 

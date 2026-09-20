@@ -1,6 +1,7 @@
 # Antigravity as an agents-acp executor
 
-Status: research only. No adapter is shipped in this change.
+Status: adapter shipped (`acp/antigravity.ts`). This note is the contract
+the implementation follows.
 Question: can `agents-acp` add Google Antigravity next to Cursor CLI and Grok Build?
 
 **Verdict: yes**, using Google's official ACP server. Do not wrap the `agy` TUI and do not ship a community stdio shim.
