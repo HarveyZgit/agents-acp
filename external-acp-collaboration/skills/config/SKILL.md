@@ -9,12 +9,13 @@ Do **not** call `start`, `resume`, or any respond tool. This skill only reads an
 
 1. Call `get_config` with `suggestedWorkspace` set to the current project root.
 2. Report the current `host`, `defaultProvider`, `defaultModel`, `defaultEffort`, `defaultSpeed`, `launchModel`, `workspace`, `configPath`, `needsSetup`, and the `catalogs` model lists.
-3. Collect the next defaults:
+3. Report each provider's confirmed `launch` (`argv`, `source`, `spawn: "direct"`). Also report `setupQuestions` id `confirmedLaunch`. The plugin spawns that official file with `shell:false`. If `ignoredWrappers` lists an `agy` / `cursor` / `grok` function, alias, or PATH file, tell the user it was detected and **will not be used**. Never invoke those wrapper names from the host shell to “help” setup — do not follow a user-modified `agy` function (for example one that checks the network first).
+4. Collect the next defaults:
    - If this prompt already names an agent (`cursor` / `grok` / `antigravity`), a model keyword, Fast/standard speed, High/other effort, or workspace, use those values. Do not re-ask for a field the user already named.
    - Otherwise ask with the returned `setupQuestions`. When the user asked to **change** settings and `setupQuestions` is empty, ask agent, model, effort (High), speed (Fast), and workspace.
    - Never guess `defaultProvider`.
-4. Resolve the model **from the matching agent's catalog** (`catalogs[].models`). Match the user's keyword against catalog `id` / `label` / `base`. Persist the catalog base id, not the raw keyword. If several bases match, ask the user to pick an id.
-5. Persist Fast and High separately: `defaultSpeed: "fast"` and `defaultEffort: "high"`. Do not invent a combined string such as `composer-2.5 fast high`. Cursor launch ids are composed by the server (`composer-2.5-high-fast`). Grok uses `--model` plus `--effort`. Antigravity has no Fast dimension; High is a Gemini slug suffix (`gemini-3.8-flash-high`) set in-session. Never persist `agy` as the provider id — store `antigravity`.
-6. Call `configure` with `userConfirmed: true` and only the fields they chose or named. Pass `defaultModel: ""` to clear model, effort, and speed.
-7. Call `get_config` again. Confirm the stored `defaultModel` is a catalog id, `defaultEffort` / `defaultSpeed` match the request, and `writesProjectRuntimeDir` is false. Tell the user the stored defaults and `launchModel`.
-8. Stop.
+5. Resolve the model **from the matching agent's catalog** (`catalogs[].models`). Match the user's keyword against catalog `id` / `label` / `base`. Persist the catalog base id, not the raw keyword. If several bases match, ask the user to pick an id.
+6. Persist Fast and High separately: `defaultSpeed: "fast"` and `defaultEffort: "high"`. Do not invent a combined string such as `composer-2.5 fast high`. Cursor launch ids are composed by the server (`composer-2.5-high-fast`). Grok uses `--model` plus `--effort`. Antigravity has no Fast dimension; High is a Gemini slug suffix (`gemini-3.8-flash-high`) set in-session. Never persist `agy` as the provider id — store `antigravity`.
+7. Call `configure` with `userConfirmed: true` and only the fields they chose or named. Pass `defaultModel: ""` to clear model, effort, and speed.
+8. Call `get_config` again. Confirm the stored `defaultModel` is a catalog id, `defaultEffort` / `defaultSpeed` match the request, and `writesProjectRuntimeDir` is false. Tell the user the stored defaults, `launchModel`, and the confirmed official spawn argv. Repeat that ignored wrappers were not followed.
+9. Stop.

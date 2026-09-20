@@ -9,6 +9,7 @@ import {
   type StartOptions,
 } from "./provider.ts";
 import { composeCursorLaunchId, parseListModelsOutput, type ModelCatalog } from "../models.ts";
+import { inspectLaunch, resolveOnPath, type CommandClassifier } from "./launch-inspect.ts";
 
 /**
  * Only the official `cursor-agent` binary is used. `cursor` is the desktop
@@ -57,6 +58,8 @@ type ResolvedCursorLaunch = {
   version?: string;
 };
 
+const CURSOR_COLLISIONS = ["cursor", "agent"];
+
 class ProcessCursorProbe implements CursorProbe {
   run(executable: string, args: string[], env: NodeJS.ProcessEnv = probeEnvironment()): CursorProbeResult {
     const result = spawnSync(executable, args, {
@@ -84,35 +87,52 @@ export class CursorProvider extends AcpProvider {
     supportedModes: ["ask", "plan", "agent"],
   };
   private readonly probe: CursorProbe;
+  private readonly classifier?: CommandClassifier;
   private resolved?: ResolvedCursorLaunch;
 
-  constructor(probe: CursorProbe = new ProcessCursorProbe()) {
+  constructor(probe: CursorProbe = new ProcessCursorProbe(), classifier?: CommandClassifier) {
     super();
     this.probe = probe;
+    this.classifier = classifier;
   }
 
   get executable(): string {
-    return EXECUTABLE;
+    return this.resolved?.executable ?? EXECUTABLE;
   }
 
   discover() {
     const resolved = this.resolve();
     if (!resolved) {
+      const launch = inspectLaunch({
+        args: ["acp"],
+        source: "missing",
+        collisionNames: CURSOR_COLLISIONS,
+        classifier: this.classifier,
+      });
       return {
         provider: this.name,
         available: false,
         executable: EXECUTABLE,
         capabilities: this.capabilities,
         note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`.",
+        launch,
       };
     }
+    const launch = inspectLaunch({
+      executable: resolved.executable,
+      args: resolved.args,
+      source: "path",
+      collisionNames: CURSOR_COLLISIONS,
+      classifier: this.classifier,
+    });
     return {
       provider: this.name,
       available: true,
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast).`,
+      note: `Selected ACP launch: ${launch.argv} (shell:false). Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast). User cursor/agent wrappers are not followed.`,
+      launch,
     };
   }
 
@@ -181,7 +201,11 @@ export class CursorProvider extends AcpProvider {
     const args = ["acp"];
     const help = this.probe.run(EXECUTABLE, [...args, "--help"]);
     if (succeeded(help) && /\bacp\b/i.test(`${help.stdout ?? ""}\n${help.stderr ?? ""}`)) {
-      this.resolved = { executable: EXECUTABLE, args, version: firstLine(version.stdout) };
+      this.resolved = {
+        executable: resolveOnPath(EXECUTABLE) ?? EXECUTABLE,
+        args,
+        version: firstLine(version.stdout),
+      };
       return this.resolved;
     }
     return undefined;

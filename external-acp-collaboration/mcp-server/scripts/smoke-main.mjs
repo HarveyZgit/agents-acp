@@ -86,6 +86,8 @@ try {
   const discovery = await call("list_providers", {});
   assert.equal(discovery.configLoaded, true);
   assert.ok(discovery.providers.some((provider) => provider.provider === "fake" && provider.available));
+  assert.ok(discovery.providers.every((provider) => provider.launch?.spawn === "direct"));
+  assert.ok(snapshot.setupQuestions.some((question) => question.id === "confirmedLaunch"));
 
   // Read-only review must negotiate a read-only ACP mode, not the default agent mode.
   const first = await call("start", {

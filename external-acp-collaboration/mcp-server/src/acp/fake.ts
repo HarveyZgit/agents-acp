@@ -9,6 +9,7 @@ import {
   type StartOptions,
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
+import { inspectLaunch } from "./launch-inspect.ts";
 
 /**
  * A deterministic ACP fixture for smoke tests. It is never registered unless
@@ -29,6 +30,7 @@ export class FakeProvider extends AcpProvider {
   }
 
   discover(): ProviderAvailability {
+    const args = this.command({ cwd: process.cwd(), prompt: "", mode: "review" });
     return {
       provider: "fake",
       available: true,
@@ -36,6 +38,12 @@ export class FakeProvider extends AcpProvider {
       version: "bundled-test-fixture",
       capabilities: this.capabilities,
       note: "Enabled only for deterministic local smoke testing.",
+      launch: inspectLaunch({
+        executable: process.execPath,
+        args,
+        source: "path",
+        collisionNames: [],
+      }),
     };
   }
 

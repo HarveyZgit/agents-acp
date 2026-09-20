@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -13,6 +13,14 @@ import {
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
 import { parseSessionModels, type CatalogModel, type ModelCatalog } from "../models.ts";
+import {
+  inspectLaunch,
+  isExecutableFile,
+  pathEntries,
+  type CommandClassifier,
+  type LaunchInspection,
+  type LaunchSource,
+} from "./launch-inspect.ts";
 
 /**
  * Official ACP server only. Never wrap the `agy` TUI and never fall back to
@@ -24,6 +32,7 @@ const REJECTED_NAMES = new Set(["agy"]);
 export type AntigravityResolve = {
   executable: string;
   args: string[];
+  source?: LaunchSource;
 };
 
 export interface AntigravityLocator {
@@ -51,22 +60,23 @@ class FilesystemAntigravityLocator implements AntigravityLocator {
       }
       rejectUnofficialName(path.basename(explicit), true);
       if (!isExecutableFile(explicit)) return undefined;
-      return { executable: explicit, args: officialArgs() };
+      return { executable: explicit, args: officialArgs(), source: "env" };
     }
 
     const home = env.HOME?.trim() || homedir();
-    const candidates = [
-      path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par"),
-      path.join(home, ".local", "bin", "agy_acp_server.par"),
+    const managed = path.join(home, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
+    const candidates: Array<{ file: string; source: LaunchSource }> = [
+      { file: managed, source: "managed" },
+      { file: path.join(home, ".local", "bin", "agy_acp_server.par"), source: "path" },
       ...pathEntries(env.PATH).flatMap((directory) => [
-        path.join(directory, "agy_acp_server.par"),
-        path.join(directory, "antigravity-acp"),
+        { file: path.join(directory, "agy_acp_server.par"), source: "path" as const },
+        { file: path.join(directory, "antigravity-acp"), source: "path" as const },
       ]),
     ];
     for (const candidate of candidates) {
-      if (!isExecutableFile(candidate)) continue;
-      rejectUnofficialName(path.basename(candidate), false);
-      return { executable: candidate, args: officialArgs() };
+      if (!isExecutableFile(candidate.file)) continue;
+      rejectUnofficialName(path.basename(candidate.file), false);
+      return { executable: candidate.file, args: officialArgs(), source: candidate.source };
     }
     return undefined;
   }
@@ -80,12 +90,14 @@ export class AntigravityProvider extends AcpProvider {
     supportedModes: ["ask", "plan", "agent"],
   };
   private readonly locator: AntigravityLocator;
+  private readonly classifier?: CommandClassifier;
   private resolved?: AntigravityResolve;
   private cachedModels: CatalogModel[] = [];
 
-  constructor(locator: AntigravityLocator = new FilesystemAntigravityLocator()) {
+  constructor(locator?: AntigravityLocator, classifier?: CommandClassifier) {
     super();
-    this.locator = locator;
+    this.locator = locator ?? new FilesystemAntigravityLocator();
+    this.classifier = classifier;
   }
 
   get executable(): string {
@@ -103,26 +115,31 @@ export class AntigravityProvider extends AcpProvider {
         executable: "agy_acp_server.par",
         capabilities: this.capabilities,
         note: error instanceof Error ? error.message : "Antigravity ACP is unavailable.",
+        launch: this.inspect(undefined),
       };
     }
     if (!resolved) {
+      const launch = this.inspect(undefined);
       return {
         provider: this.name,
         available: false,
         executable: "agy_acp_server.par",
         capabilities: this.capabilities,
         note: "Official Antigravity ACP server was not found. Set AGY_ACP_BIN to agy_acp_server.par or install antigravity-acp. This provider never wraps the agy TUI.",
+        launch,
       };
     }
     const loggedIn = this.cliSessionKnownGood();
+    const launch = this.inspect(resolved);
     return {
       provider: this.name,
       available: loggedIn,
       executable: resolved.executable,
       capabilities: this.capabilities,
       note: loggedIn
-        ? `Selected ACP launch: ${[resolved.executable, ...resolved.args].join(" ")}. Model is session/set_config_option {configId:\"model\"}; effort is a Gemini slug suffix. Modes stay on default — never yolo or auto_edit.`
+        ? `${launchNote(launch)} Model is session/set_config_option {configId:\"model\"}; effort is a Gemini slug suffix. Modes stay on default — never yolo or auto_edit.`
         : `Binary found at ${resolved.executable}, but no ~/.gemini/antigravity-acp/acp_token.json or GEMINI_API_KEY / GOOGLE_API_KEY is visible. Log in via the Antigravity IDE or Zed first; do not expect headless OAuth in this child.`,
+      launch,
     };
   }
 
@@ -199,10 +216,29 @@ export class AntigravityProvider extends AcpProvider {
     this.resolved = this.locator.resolve();
     return this.resolved;
   }
+
+  private inspect(resolved: AntigravityResolve | undefined): LaunchInspection {
+    return inspectLaunch({
+      executable: resolved?.executable,
+      args: resolved?.args ?? officialArgs(),
+      source: resolved?.source ?? (resolved ? "path" : "missing"),
+      collisionNames: [...REJECTED_NAMES],
+      classifier: this.classifier,
+    });
+  }
 }
 
 function officialArgs(): string[] {
   return ["--uid="];
+}
+
+function launchNote(launch: LaunchInspection): string {
+  const wrappers = launch.ignoredWrappers
+    .map((wrapper) => `${wrapper.name} (${wrapper.kind})`)
+    .join(", ");
+  return wrappers
+    ? `Selected ACP launch: ${launch.argv} (shell:false). Ignored user wrappers: ${wrappers}.`
+    : `Selected ACP launch: ${launch.argv} (shell:false). User agy functions/aliases are not followed.`;
 }
 
 function rejectUnofficialName(name: string, explicitBin: boolean): void {
@@ -215,15 +251,4 @@ function rejectUnofficialName(name: string, explicitBin: boolean): void {
   }
 }
 
-function isExecutableFile(candidate: string): boolean {
-  try {
-    return existsSync(candidate) && statSync(candidate).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function pathEntries(value: string | undefined): string[] {
-  return (value ?? "").split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
-}
 

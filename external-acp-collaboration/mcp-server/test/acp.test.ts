@@ -290,8 +290,10 @@ test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   const provider = availableCursor();
   const discovery = provider.discover();
   assert.equal(discovery.available, true);
-  assert.equal(discovery.executable, "cursor-agent");
-  assert.match(discovery.note ?? "", /cursor-agent acp/);
+  assert.equal(discovery.executable.endsWith("cursor-agent"), true);
+  assert.match(discovery.note ?? "", /cursor-agent acp|shell:false/);
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.deepEqual(discovery.launch?.args, ["acp"]);
   assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
 });
 

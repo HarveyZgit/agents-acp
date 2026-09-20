@@ -25,6 +25,10 @@ newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
 transport and lifecycle behavior. `cursor.ts`, `grok.ts`, and
 `antigravity.ts` contain only provider-specific executable, authentication,
 model, and launch details. Antigravity never wraps the `agy` TUI.
+`$config` inspects the official binary and reports the exact spawn argv
+(`shell:false`). User-modified commands — for example an `agy` shell
+function that checks the network first — are detected as `ignoredWrappers`
+and are not followed.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
 and changed-file summaries. It never writes task prompts, credentials, or
@@ -35,7 +39,7 @@ streamed text to disk; streamed text stays in memory while the server runs.
 | Tool | Purpose |
 | --- | --- |
 | `list_providers` | Discovered providers, resolved ACP command, centralized config path, and defaults |
-| `get_config` | Runtime dir, defaults, catalogs, `needsSetup`, and setup questions. Never writes a project-local `.agents-acp` |
+| `get_config` | Runtime dir, defaults, catalogs, `needsSetup`, setup questions, and confirmed official spawn argv. Reports user wrappers that will not be followed. Never writes a project-local `.agents-acp` |
 | `configure` | Persist default provider, catalog model id, effort (High), speed (Fast), and workspace. Resolves keywords against the agent model list |
 | `start` | Start a `review`, `plan`, or `implement` run. `provider`/`model`/`effort`/`speed` may be omitted after configure |
 | `status` | Lifecycle stage, sanitized error, events, pending requests and their offered option IDs |

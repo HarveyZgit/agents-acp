@@ -134,6 +134,13 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultProvider"));
   assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultEffort"));
   assert.ok(before.setupQuestions.some((question: { id: string }) => question.id === "defaultSpeed"));
+  const launchQuestion = before.setupQuestions.find((question: { id: string }) => question.id === "confirmedLaunch");
+  assert.ok(launchQuestion, "setup must include confirmedLaunch");
+  assert.equal(launchQuestion.readOnly, true);
+  assert.ok(Array.isArray(launchQuestion.launches));
+  assert.ok(before.providers.some((provider: { provider: string; launch?: { spawn?: string } }) => (
+    provider.provider === "antigravity" && provider.launch?.spawn === "direct"
+  )));
 
   const after = JSON.parse(saved.result.content[0].text);
   assert.equal(after.needsSetup, false);

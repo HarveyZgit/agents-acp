@@ -59,7 +59,7 @@ const tools = [
     type: "object",
     properties: {},
   }),
-  tool("get_config", "Return centralized runtime paths, defaults, and setup questions. Does not write project-local files.", {
+  tool("get_config", "Return centralized runtime paths, defaults, setup questions, and confirmed official spawn argv. Reports user command wrappers (agy functions, cursor/agent aliases) that will not be followed. Does not write project-local files.", {
     type: "object",
     properties: {
       suggestedWorkspace: {
@@ -212,7 +212,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
         serverInfo: { name: "agents-acp", version: SERVER_VERSION },
-        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
+        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Report providers[].launch and confirmedLaunch: spawn the official argv with shell:false and never invoke ignoredWrappers such as an agy function. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -460,34 +460,48 @@ function configSnapshot(suggestedWorkspace?: string) {
     provider: provider.provider,
     available: provider.available,
     version: provider.version,
+    executable: provider.executable,
     note: provider.note,
+    launch: provider.launch,
   }));
   const catalogs = controller.listModels();
   const snapshot = publicConfig(config, catalogs);
+  const questions = snapshot.needsSetup
+    ? [
+      {
+        id: "defaultProvider",
+        prompt: "Which ACP agent should be the default?",
+        options: [
+          { id: "cursor", label: "Cursor CLI (cursor-agent)" },
+          { id: "grok", label: "Grok Build (grok)" },
+          { id: "antigravity", label: "Antigravity ACP (agy_acp_server.par)" },
+        ],
+      },
+      ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
+      {
+        id: "workspace",
+        prompt: "Absolute workspace root the provider may run in.",
+        suggested: suggestedWorkspace,
+        optional: Boolean(config.workspace),
+      },
+    ]
+    : modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider));
   return {
     ...snapshot,
     providers,
     catalogs,
-    setupQuestions: snapshot.needsSetup
-      ? [
-        {
-          id: "defaultProvider",
-          prompt: "Which ACP agent should be the default?",
-          options: [
-            { id: "cursor", label: "Cursor CLI (cursor-agent)" },
-            { id: "grok", label: "Grok Build (grok)" },
-            { id: "antigravity", label: "Antigravity ACP (agy_acp_server.par)" },
-          ],
-        },
-        ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
-        {
-          id: "workspace",
-          prompt: "Absolute workspace root the provider may run in.",
-          suggested: suggestedWorkspace,
-          optional: Boolean(config.workspace),
-        },
-      ]
-      : modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
+    setupQuestions: [...questions, launchSetupQuestion(providers)],
+  };
+}
+
+function launchSetupQuestion(providers: Array<{ provider: string; launch?: { argv?: string; ignoredWrappers?: unknown[] } }>) {
+  return {
+    id: "confirmedLaunch",
+    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}). Report them to the user. Do not invoke ignoredWrappers from the host shell (for example an agy function that checks the network). Those wrappers are detected and never followed.",
+    readOnly: true,
+    launches: providers.flatMap((provider) => (
+      provider.launch ? [{ provider: provider.provider, ...provider.launch }] : []
+    )),
   };
 }
 

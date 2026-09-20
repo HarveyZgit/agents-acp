@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import readline from "node:readline";
 import type { EnvMode } from "../config.ts";
 import type { CatalogModel, CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
+import type { LaunchInspection } from "./launch-inspect.ts";
 
 export type ProviderName = "cursor" | "grok" | "antigravity" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
@@ -54,6 +55,8 @@ export type ProviderAvailability = {
   version?: string;
   capabilities: ProviderCapabilities;
   note?: string;
+  /** Official spawn argv plus wrappers the plugin detected and will not follow. */
+  launch?: LaunchInspection;
 };
 
 export type StartOptions = {
