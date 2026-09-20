@@ -242,6 +242,52 @@ test("MCP env launch id is stored as base + Fast/High, not doubled", async () =>
   assert.equal(String(snapshot.body.launchModel).includes("high-fast-high-fast"), false);
 });
 
+test("MCP configure resolves an Antigravity keyword without login", async () => {
+  const home = mkdtempSync(join(tmpdir(), "agents-acp-agy-cfg-"));
+  const workspace = mkdtempSync(join(tmpdir(), "agents-acp-agy-cfgws-"));
+  const { responses } = await callMcp({
+    HOME: home,
+    EXTERNAL_ACP_ENABLE_FAKE: "1",
+    EXTERNAL_ACP_CATALOG_FIXTURE: catalogFixture,
+  }, [
+    {
+      id: 1,
+      name: "configure",
+      args: {
+        workspace,
+        defaultProvider: "agy",
+        defaultModel: "flash high",
+        userConfirmed: true,
+      },
+    },
+    { id: 2, name: "get_config", args: {} },
+    {
+      id: 3,
+      name: "start",
+      args: {
+        provider: "antigravity",
+        cwd: workspace,
+        prompt: "keyword launch",
+        mode: "review",
+        model: "flash",
+        effort: "high",
+      },
+    },
+  ]);
+  const saved = toolResult(responses, 1);
+  const snapshot = toolResult(responses, 2);
+  const started = toolResult(responses, 3);
+  assert.equal(saved.isError, false, JSON.stringify(saved.body));
+  assert.equal(saved.body.defaultProvider, "antigravity");
+  assert.equal(saved.body.defaultModel, "gemini-3.8-flash");
+  assert.equal(saved.body.defaultEffort, "high");
+  assert.equal(saved.body.launchModel, "gemini-3.8-flash-high");
+  assert.equal(snapshot.body.defaultProvider, "antigravity");
+  assert.equal(started.isError, true);
+  assert.match(started.body.error, /AGY_ACP_BIN|never falls back to agy|unavailable/i);
+  assert.equal(/catalog is unavailable|raw keyword/i.test(started.body.error), false);
+});
+
 test("MCP env default model cannot inject a raw keyword", async () => {
   const home = mkdtempSync(join(tmpdir(), "agents-acp-cat-env-"));
   const workspace = mkdtempSync(join(tmpdir(), "agents-acp-cat-envws-"));

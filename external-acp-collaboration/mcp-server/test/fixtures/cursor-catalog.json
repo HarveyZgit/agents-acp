@@ -1,4 +1,10 @@
 {
+  "antigravity": [
+    { "id": "gemini-3.8-flash-high", "label": "Gemini 3.8 Flash (High)" },
+    { "id": "gemini-3.8-flash-medium", "label": "Gemini 3.8 Flash (Medium)" },
+    { "id": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)" },
+    { "id": "gemini-pro-agent", "label": "Gemini 3.1 Pro (High)" }
+  ],
   "cursor": [
     { "id": "composer-1", "label": "Composer 1" },
     { "id": "composer-2.5", "label": "Composer 2.5" },

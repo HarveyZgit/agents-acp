@@ -38,6 +38,9 @@ test("plugin MCP config uses the camelCase key Codex loads, with cwd and env for
     "CURSOR_AUTH_TOKEN",
     "AGENT_CLI_CREDENTIAL_STORE",
     "XAI_API_KEY",
+    "AGY_ACP_BIN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
     "HOME",
     "PATH",
   ]) {
@@ -86,6 +89,7 @@ test("plugin ships invocable $config and $dispatch skills", () => {
   assert.match(dispatch, /config skill|`config`|\$config/);
   assert.match(dispatch, /start/);
   assert.match(dispatch, /Claude Code|native Codex or Claude/);
+  assert.match(dispatch, /antigravity|agy_acp_server/);
 
   const install = readFileSync(new URL("../../../INSTALL.md", import.meta.url), "utf8");
   const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");

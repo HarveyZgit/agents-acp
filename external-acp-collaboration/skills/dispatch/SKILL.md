@@ -1,20 +1,22 @@
 ---
 name: dispatch
-description: Dispatch a scoped coding task to a locally installed Cursor CLI or Grok Build ACP agent. If the user only wants to initialize or change the default agent/model, use the config skill instead of starting a run.
+description: Dispatch a scoped coding task to a locally installed Cursor CLI, Grok Build, or Antigravity ACP agent. If the user only wants to initialize or change the default agent/model, use the config skill instead of starting a run.
 ---
 
-Use this skill when the user explicitly asks to dispatch, delegate, or send a task to an independent external agent, names Cursor CLI or Grok Build, or benefits from a second opinion. Do not present the run as a native Codex or Claude Code subagent. Do not do the coding work yourself when the user asked to dispatch.
+Use this skill when the user explicitly asks to dispatch, delegate, or send a task to an independent external agent, names Cursor CLI, Grok Build, or Antigravity, or benefits from a second opinion. Do not present the run as a native Codex or Claude Code subagent. Do not do the coding work yourself when the user asked to dispatch.
 
 If this turn is only setup or a settings change (initialize, configure, change default agent/model), follow the `config` skill and stop after `configure`. Do not call `start`.
 
 Runtime files stay in the centralized `runtimeDir` from `get_config`. Never create or write `.agents-acp` in the project.
 
 1. Call `get_config` with `suggestedWorkspace` set to the current project root.
-2. If `needsSetup` is true, do **not** guess a provider. Ask the user with the returned `setupQuestions`, or apply values they already named in the prompt (`cursor` / `grok`, optional model). Then call `configure` with `userConfirmed: true`.
+2. If `needsSetup` is true, do **not** guess a provider. Ask the user with the returned `setupQuestions`, or apply values they already named in the prompt (`cursor` / `grok` / `antigravity`, optional model). Then call `configure` with `userConfirmed: true`.
 3. If the user later says to change the default agent or model, follow the `config` skill (ask or use the named values, then `configure`).
 4. Call `list_providers` and report unavailable local executables clearly. Prefer the stored `defaultProvider` / `defaultModel` / `defaultEffort` / `defaultSpeed`. A start may omit `provider`, `model`, `effort`, and `speed` after configure. Pass those fields only to override for that run. If the user names a model keyword, resolve it against that agent's catalog before `start`; do not pass the raw keyword.
 
 Cursor uses `cursor-agent acp` only; it never falls back to `cursor` or `agent`. Official ACP has no universal model field; the CLI still accepts `cursor-agent --model <id> acp`. Fast is `speed=fast` and High is `effort=high`; Cursor composes them into the launch id.
+
+Antigravity uses only the official `agy_acp_server.par` / `antigravity-acp` binary (`AGY_ACP_BIN`). It never wraps the `agy` TUI. There is no startup `--model`; the server sets `session/set_config_option` `{configId:"model"}`. All of `review` / `plan` / `implement` stay on session mode `default`. Never `yolo` or `auto_edit`. Cancel is process-group kill because `session/cancel` is missing on current RC builds. Log in via the Antigravity IDE, Zed, `~/.gemini/antigravity-acp/`, or `GEMINI_API_KEY` — do not expect headless OAuth in this child.
 
 5. Use `review` or `plan` for read-only questions. These runs may be parallel. A run fails rather than silently using a write-capable default mode.
 6. Use `implement` only when the user explicitly asks for changes, pass `allowImplement: true`, and only after the local operator enabled unsandboxed implementation. It is serialized per workspace.
@@ -27,3 +29,5 @@ Cursor uses `cursor-agent acp` only; it never falls back to `cursor` or `agent`.
 If a Cursor run fails during authenticate or session creation, do not tell the user to run `cursor-agent login` when `cursor-agent status` already shows a login. `-32602` from `authenticate(cursor_login)` is retried once against `session/new`; if that retry is still `auth_required`, report a failed authenticate (no browser in the host child, unknown method, or timeout), not a missing login. A later `Failed to initialize session services` is a session-service error, not a login problem.
 
 If a Grok run fails at `session/new` with Permission denied, report the workspace and `~/.grok` access guidance from `status.error`. Do not invent a login step when the user already uses `grok` interactively.
+
+If an Antigravity run fails at authenticate or session creation, do not tell the user to complete Google OAuth inside the host child. Prefer a pre-existing `~/.gemini/antigravity-acp/acp_token.json` or `GEMINI_API_KEY`. Report a missing official binary (`AGY_ACP_BIN`) distinctly from a missing login.

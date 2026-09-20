@@ -4,8 +4,9 @@ Current packaged version: **0.2.4-pre.1**.
 
 `agents-acp` is a Codex and Claude Code plugin that delegates a scoped task
 to a locally installed ACP-capable coding agent. The adapters target Grok
-Build (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`)
-and Cursor CLI (`cursor-agent acp`).
+Build (`grok --no-auto-update --cwd <workspace> agent --no-leader stdio`),
+Cursor CLI (`cursor-agent acp`), and Antigravity
+(`agy_acp_server.par --uid=`).
 
 Cursor uses only the official `cursor-agent` binary. It never invokes `cursor`
 (the desktop launcher on many machines) and never invokes a bare `agent`,
@@ -21,8 +22,9 @@ newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
 `completed` events.
 
 `external-acp-collaboration/mcp-server/src/acp/provider.ts` owns shared ACP
-transport and lifecycle behavior. `cursor.ts` and `grok.ts` contain only
-provider-specific executable, authentication, model, and launch details.
+transport and lifecycle behavior. `cursor.ts`, `grok.ts`, and
+`antigravity.ts` contain only provider-specific executable, authentication,
+model, and launch details. Antigravity never wraps the `agy` TUI.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
 and changed-file summaries. It never writes task prompts, credentials, or
@@ -73,8 +75,10 @@ are `/agents-acp:config` and `/agents-acp:dispatch`.
   `session/new` is expanded to name workspace and provider-session file access.
 - Modes are read from the ACP `SessionModeState` object
   (`modes.availableModes` / `modes.currentModeId`), with a fallback to
-  `configOptions` of `category: "mode"`. `review` requires `ask` or `plan`,
-  `plan` requires `plan` or `ask`, and `implement` requires `agent`. If no
+  `configOptions` of `category: "mode"`.   `review` requires `ask` or `plan`,
+  `plan` requires `plan` or `ask`, and `implement` requires `agent`. Antigravity
+  is different: its modes are permission policy (`default` / `auto_edit` /
+  `yolo`). Every agents-acp task stays on `default`. Never `yolo`. If no
   acceptable mode can be confirmed, the run **fails closed** rather than
   running a read-only request in a write-capable default mode.
 - `session/prompt` has no fixed request timeout. A prompt turn is bounded by
@@ -128,11 +132,15 @@ are `/agents-acp:config` and `/agents-acp:dispatch`.
 
 After `configure`, `start` may omit `provider`, `model`, `effort`, and `speed`
 and uses the stored defaults. Pass those fields only to override that run.
-`$config` resolves a user keyword against `cursor-agent --list-models` or
-`grok models` and stores the catalog id, never the raw text. Fast is
-`defaultSpeed` and High is `defaultEffort`. Cursor composes them into the
-launch id (`composer-2.5-high-fast`); Grok passes `--model` plus `--effort`.
-Model values are a single argv element and never concatenated into a prompt.
+`$config` resolves a user keyword against `cursor-agent --list-models`,
+`grok models`, or the Antigravity session catalog (or
+`EXTERNAL_ACP_CATALOG_FIXTURE`) and stores the catalog id, never the raw
+text. Fast is `defaultSpeed` and High is `defaultEffort`. Cursor composes
+them into the launch id (`composer-2.5-high-fast`); Grok passes `--model`
+plus `--effort`; Antigravity sets `session/set_config_option` to a Gemini
+slug such as `gemini-3.8-flash-high`. Model values are a single argv
+element (Cursor/Grok) or an in-session config value (Antigravity) and
+never concatenated into a prompt.
 
 ## Installation
 
@@ -188,6 +196,8 @@ cursor-agent acp --help
 cursor-agent status
 grok --version
 grok agent --help
+# optional: official Antigravity ACP server, never the agy TUI
+ls "${AGY_ACP_BIN:-$HOME/.local/bin/agy_acp_server.par}"
 
 cd external-acp-collaboration/mcp-server
 npm test
@@ -195,8 +205,8 @@ npm run smoke:main
 ```
 
 `npm run smoke:main` exercises the full MCP flow against a bundled fake ACP
-agent that speaks documented ACP shapes. It needs no Codex login and no Cursor
-or Grok binaries.
+agent that speaks documented ACP shapes. It needs no Codex login and no Cursor,
+Grok, or Antigravity binaries.
 
 ## Verification boundaries
 

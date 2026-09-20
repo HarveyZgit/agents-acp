@@ -1,4 +1,5 @@
 import path from "node:path";
+import { AntigravityProvider } from "./acp/antigravity.ts";
 import { CursorProvider } from "./acp/cursor.ts";
 import { FakeProvider } from "./acp/fake.ts";
 import { GrokProvider } from "./acp/grok.ts";
@@ -29,7 +30,15 @@ import {
 import { WorkspacePolicy } from "./policy.ts";
 import { redactSecrets, RunStore, type RunRecord, type RunStatus } from "./run-store.ts";
 import type { EnvMode } from "./config.ts";
-import { overlayCatalogFixture, type EffortLevel, type ModelCatalog, type SpeedLevel } from "./models.ts";
+import {
+  composeAntigravityLaunchId,
+  currentSessionModel,
+  overlayCatalogFixture,
+  parseSessionModels,
+  type EffortLevel,
+  type ModelCatalog,
+  type SpeedLevel,
+} from "./models.ts";
 
 const CLIENT_VERSION = "0.2.4-pre.1";
 const SHORT_TIMEOUT_MS = 30_000;
@@ -94,12 +103,6 @@ type RuntimeRun = {
   idleTimeout?: NodeJS.Timeout;
 };
 
-/** Read-only task modes must land on a read-only ACP mode or fail. */
-const ACCEPTABLE_MODES: Record<TaskMode, string[]> = {
-  review: ["ask", "plan"],
-  plan: ["plan", "ask"],
-  implement: ["agent", "code"],
-};
 
 export class RunController {
   private readonly store: RunStore;
@@ -123,6 +126,7 @@ export class RunController {
     this.providers = new Map((options.providers ?? [
       new CursorProvider(),
       new GrokProvider(),
+      new AntigravityProvider(),
       ...(options.enableFake ? [new FakeProvider()] : []),
     ]).map((provider) => [provider.name, provider]));
   }
@@ -161,9 +165,9 @@ export class RunController {
 
     let record: RunRecord | undefined;
     try {
-      const catalog = request.provider === "cursor" || request.provider === "grok"
-        ? this.listModels(request.provider)[0]?.models ?? []
-        : [];
+      const catalog = request.provider === "fake"
+        ? []
+        : this.listModels(request.provider)[0]?.models ?? [];
       const startOptions = {
         ...request,
         cwd: decision.cwd,
@@ -193,7 +197,7 @@ export class RunController {
         preauthenticatedSessionAttempted: false,
         cancelRequested: false,
         status: "starting",
-        acceptableModes: ACCEPTABLE_MODES[request.mode],
+        acceptableModes: provider.acceptableSessionModes(request.mode),
         modeConfirmed: false,
         outsideWorkspaceWrites: [],
       };
@@ -405,7 +409,10 @@ export class RunController {
       this.acceptEvent(id, { type: "started", provider: request.provider, sessionId });
 
       runtime.stage = "mode";
+      runtime.provider.ingestSession(session);
       await this.selectMode(id, runtime, sessionId, request.mode, session);
+      if (!this.isActive(id)) return;
+      await this.selectSessionModel(id, runtime, sessionId, request, session);
       if (!this.isActive(id)) return;
       runtime.modeConfirmed = true;
 
@@ -413,7 +420,7 @@ export class RunController {
       // A prompt turn is open-ended; the run and idle watchdogs bound it.
       const completion = await runtime.peer.request("session/prompt", {
         sessionId,
-        prompt: [{ type: "text", text: request.prompt }],
+        prompt: [{ type: "text", text: runtime.provider.decoratePrompt(request.mode, request.prompt) }],
       }, 0);
       if (!this.isActive(id)) return;
       this.finishPrompt(id, runtime, completion);
@@ -519,7 +526,7 @@ export class RunController {
     session: Record<string, unknown>,
   ): Promise<void> {
     const { availableModes, currentModeId, configOptionId } = readSessionModes(session);
-    const acceptable = ACCEPTABLE_MODES[mode];
+    const acceptable = runtime.acceptableModes;
 
     if (currentModeId && acceptable.includes(currentModeId)) {
       this.acceptEvent(id, { type: "activity", label: `ACP mode: already in ${currentModeId}.` });
@@ -553,6 +560,32 @@ export class RunController {
     throw new Error(
       `The provider did not offer a ${mode === "implement" ? "write" : "read-only"} mode for this task. Required one of: ${acceptable.join(", ")}. Advertised: ${advertised}. Current: ${currentModeId ?? "unknown"}.`,
     );
+  }
+
+  private async selectSessionModel(
+    id: string,
+    runtime: RuntimeRun,
+    sessionId: string,
+    request: StartRequest,
+    session: Record<string, unknown>,
+  ): Promise<void> {
+    if (runtime.provider.capabilities.modelSelection !== "session" || !request.model) return;
+    const catalog = parseSessionModels(session);
+    if (catalog.length === 0) {
+      throw new Error("The provider selects models in-session but session/new did not advertise a model catalog.");
+    }
+    const launch = composeAntigravityLaunchId(request.model, request.effort, catalog);
+    const current = currentSessionModel(session);
+    if (current === launch) {
+      this.acceptEvent(id, { type: "activity", label: `ACP model: already ${launch}.` });
+      return;
+    }
+    await runtime.peer.request("session/set_config_option", {
+      sessionId,
+      configId: "model",
+      value: launch,
+    }, SHORT_TIMEOUT_MS);
+    this.acceptEvent(id, { type: "activity", label: `ACP model: selected ${launch}.` });
   }
 
   private finishPrompt(id: string, runtime: RuntimeRun, completion: Record<string, unknown>): void {

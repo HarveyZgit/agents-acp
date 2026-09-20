@@ -3,7 +3,7 @@ import readline from "node:readline";
 import type { EnvMode } from "../config.ts";
 import type { CatalogModel, CatalogProvider, EffortLevel, ModelCatalog, SpeedLevel } from "../models.ts";
 
-export type ProviderName = "cursor" | "grok" | "fake";
+export type ProviderName = "cursor" | "grok" | "antigravity" | "fake";
 export type AgentMode = "ask" | "plan" | "agent";
 export type TaskMode = "review" | "plan" | "implement";
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
@@ -303,6 +303,12 @@ export class JsonRpcPeer {
   }
 }
 
+export const DEFAULT_ACCEPTABLE_MODES: Record<TaskMode, string[]> = {
+  review: ["ask", "plan"],
+  plan: ["plan", "ask"],
+  implement: ["agent", "code"],
+};
+
 export abstract class AcpProvider {
   abstract readonly name: ProviderName;
   abstract readonly executable: string;
@@ -331,13 +337,26 @@ export abstract class AcpProvider {
   }
 
   listModels(_options?: Pick<StartOptions, "envMode" | "envPassthrough">): ModelCatalog {
-    const provider = this.name === "cursor" || this.name === "grok" ? this.name : undefined;
+    const provider = this.name === "cursor" || this.name === "grok" || this.name === "antigravity"
+      ? this.name
+      : undefined;
     return {
       provider: (provider ?? "cursor") as CatalogProvider,
       available: false,
       models: [],
       error: `${this.name} does not expose a model catalog.`,
     };
+  }
+
+  /** Cache catalog rows that arrive on session/new (Antigravity). */
+  ingestSession(_session: Record<string, unknown>): void {}
+
+  acceptableSessionModes(mode: TaskMode): string[] {
+    return DEFAULT_ACCEPTABLE_MODES[mode];
+  }
+
+  decoratePrompt(_mode: TaskMode, prompt: string): string {
+    return prompt;
   }
 
   discover(): ProviderAvailability {

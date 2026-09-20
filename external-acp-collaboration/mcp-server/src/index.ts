@@ -1,10 +1,11 @@
 import readline from "node:readline";
-import { loadConfig, persistConfig, type PluginConfig } from "./config.ts";
+import { loadConfig, persistConfig, providerName, type DefaultProviderName, type PluginConfig } from "./config.ts";
 import {
-  composeCursorLaunchId,
+  composeLaunchId,
   resolveModelSelection,
   safeEffort,
   safeSpeed,
+  type CatalogProvider,
   type EffortLevel,
   type ModelCatalog,
   type SpeedLevel,
@@ -72,7 +73,7 @@ const tools = [
     required: ["userConfirmed"],
     properties: {
       workspace: { type: "string", description: "Absolute workspace root." },
-      defaultProvider: { type: "string", enum: ["cursor", "grok"] },
+      defaultProvider: { type: "string", enum: ["cursor", "grok", "antigravity"] },
       defaultModel: {
         type: "string",
         description: "User keyword or catalog id. Resolved against the agent model list; the raw keyword is never stored. Empty string clears model, effort, and speed.",
@@ -98,7 +99,7 @@ const tools = [
     type: "object",
     required: ["cwd", "prompt", "mode"],
     properties: {
-      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
+      provider: { type: "string", enum: ["cursor", "grok", "antigravity", "fake"] },
       cwd: { type: "string" },
       prompt: { type: "string", description: "Sent only to the provider process and never persisted." },
       mode: { type: "string", enum: ["review", "plan", "implement"] },
@@ -126,7 +127,7 @@ const tools = [
     required: ["followUp"],
     properties: {
       runId: { type: "string" },
-      provider: { type: "string", enum: ["cursor", "grok", "fake"] },
+      provider: { type: "string", enum: ["cursor", "grok", "antigravity", "fake"] },
       sessionId: { type: "string" },
       followUp: { type: "string", description: "Sent only to the provider process and never persisted." },
       allowImplement: { type: "boolean" },
@@ -293,7 +294,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{
         requireWorkspaceConfiguration();
         result = controller.resume({
           runId: optionalString(args.runId, "runId", 128),
-          provider: args.provider === undefined ? undefined : stringEnum(args.provider, ["cursor", "grok", "fake"]),
+          provider: args.provider === undefined ? undefined : requiredStartProvider(args.provider),
           sessionId: optionalString(args.sessionId, "sessionId", 512),
           followUp: requiredString(args.followUp, "followUp", 65_536),
           allowImplement: args.allowImplement === true,
@@ -475,6 +476,7 @@ function configSnapshot(suggestedWorkspace?: string) {
           options: [
             { id: "cursor", label: "Cursor CLI (cursor-agent)" },
             { id: "grok", label: "Grok Build (grok)" },
+            { id: "antigravity", label: "Antigravity ACP (agy_acp_server.par)" },
           ],
         },
         ...modelSetupQuestions(catalogs.find((catalog) => catalog.provider === config.defaultProvider)),
@@ -493,13 +495,13 @@ function applyConfigure(args: Record<string, unknown>) {
   const previousWorkspace = config.workspace;
   const provider = args.defaultProvider === undefined
     ? config.defaultProvider
-    : stringEnum(args.defaultProvider, ["cursor", "grok"]);
+    : requiredConfiguredProvider(args.defaultProvider);
   const resolved = resolveConfigureSelection(provider, args);
   const next = persistConfig({
     workspace: optionalString(args.workspace, "workspace", 4_096),
     defaultProvider: args.defaultProvider === undefined
       ? undefined
-      : stringEnum(args.defaultProvider, ["cursor", "grok"]),
+      : requiredConfiguredProvider(args.defaultProvider),
     defaultModel: resolved.model,
     defaultEffort: resolved.effort,
     defaultSpeed: resolved.speed,
@@ -517,9 +519,9 @@ function applyConfigure(args: Record<string, unknown>) {
   };
 }
 
-function resolveStartProvider(value: unknown): "cursor" | "grok" | "fake" {
+function resolveStartProvider(value: unknown): "cursor" | "grok" | "antigravity" | "fake" {
   if (value !== undefined) {
-    const provider = stringEnum(value, ["cursor", "grok", "fake"]);
+    const provider = requiredStartProvider(value);
     if (provider === "fake" && !config.enableFake) throw new Error("The fake provider is disabled.");
     return provider;
   }
@@ -535,23 +537,24 @@ function resolveStartSelection(
 ): { model?: string; effort?: EffortLevel; speed?: SpeedLevel } {
   const provider = providerValue === undefined
     ? config.defaultProvider
-    : stringEnum(providerValue, ["cursor", "grok", "fake"]);
+    : requiredStartProvider(providerValue);
   const useStored = provider === config.defaultProvider;
   const explicitModel = optionalString(modelValue, "model", 256);
   const effort = effortValue === undefined ? (useStored ? config.defaultEffort : undefined) : optionalEnum(safeEffort(effortValue));
   const speed = speedValue === undefined ? (useStored ? config.defaultSpeed : undefined) : optionalEnum(safeSpeed(speedValue));
   if (explicitModel !== undefined) {
-    const catalog = provider === "cursor" || provider === "grok"
+    const catalogProvider = catalogProviderName(provider);
+    const catalog = catalogProvider
       ? controller.listModels(provider)[0]?.models ?? []
       : [];
-    const resolved = resolveModelSelection(catalog, explicitModel, effort, speed, provider === "grok" ? "grok" : "cursor");
+    const resolved = resolveModelSelection(catalog, explicitModel, effort, speed, catalogProvider ?? "cursor");
     return { model: resolved?.model, effort: resolved?.effort, speed: resolved?.speed };
   }
   if (!useStored) return { effort, speed };
   return { model: config.defaultModel, effort, speed };
 }
 
-function resolveConfigureSelection(provider: "cursor" | "grok" | undefined, args: Record<string, unknown>) {
+function resolveConfigureSelection(provider: DefaultProviderName | undefined, args: Record<string, unknown>) {
   const clearingModel = args.defaultModel === "" || args.defaultModel === null;
   if (clearingModel) {
     return { model: null, effort: null, speed: null, launchId: undefined as string | undefined };
@@ -589,13 +592,28 @@ function resolveConfigureSelection(provider: "cursor" | "grok" | undefined, args
 }
 
 function launchModelFor(
-  provider: "cursor" | "grok",
+  provider: DefaultProviderName,
   model: string,
   effort?: EffortLevel,
   speed?: SpeedLevel,
   catalog: ModelCatalog["models"] = [],
 ): string {
-  return provider === "cursor" ? composeCursorLaunchId(model, effort, speed, catalog) : model;
+  return composeLaunchId(provider, model, effort, speed, catalog);
+}
+
+function requiredConfiguredProvider(value: unknown): DefaultProviderName {
+  const provider = providerName(value);
+  if (!provider) throw new Error('defaultProvider must be "cursor", "grok", or "antigravity".');
+  return provider;
+}
+
+function requiredStartProvider(value: unknown): "cursor" | "grok" | "antigravity" | "fake" {
+  if (value === "fake") return "fake";
+  return requiredConfiguredProvider(value);
+}
+
+function catalogProviderName(value: string | undefined): CatalogProvider | undefined {
+  return value === "cursor" || value === "grok" || value === "antigravity" ? value : undefined;
 }
 
 function modelSetupQuestions(catalog?: ModelCatalog) {

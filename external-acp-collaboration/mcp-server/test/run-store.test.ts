@@ -5,6 +5,16 @@ import { join } from "node:path";
 import test from "node:test";
 import { redactSecrets, RunStore } from "../src/run-store.ts";
 
+test("run store keeps Antigravity runs after a reload", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "external-acp-store-")), "runs.json");
+  const store = new RunStore(file);
+  const run = store.create({ provider: "antigravity", cwd: "/project", workspace: "/project", mode: "review" });
+  store.update(run.id, { sessionId: "agy-session" });
+  const restored = new RunStore(file).get(run.id);
+  assert.equal(restored.provider, "antigravity");
+  assert.equal(restored.sessionId, "agy-session");
+});
+
 test("run store persists lifecycle metadata but never streamed text", () => {
   const file = join(mkdtempSync(join(tmpdir(), "external-acp-store-")), "runs.json");
   const store = new RunStore(file);
