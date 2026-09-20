@@ -27,9 +27,10 @@ transport and lifecycle behavior. `cursor.ts`, `grok.ts`, and
 model, and launch details. Antigravity never wraps the `agy` TUI.
 `$config` inspects every CLI agent (`cursor-agent`, `grok`,
 `agy_acp_server.par`) and reports the exact spawn argv (`shell:false`).
-User-modified commands — a `cursor-agent`, `grok`, or `agy` shell function
-that checks the network first — are detected as `ignoredWrappers` and are
-not followed.
+User rc files are **read as text**, never sourced. Functions/aliases that
+check the network first are `ignoredWrappers` and are not followed. Pin
+the official file with `CURSOR_AGENT_BIN` / `GROK_BIN` / `AGY_ACP_BIN`
+when a same-name PATH script would otherwise win.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
 and changed-file summaries. It never writes task prompts, credentials, or

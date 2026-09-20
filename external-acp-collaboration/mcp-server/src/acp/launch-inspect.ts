@@ -1,6 +1,5 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 /**
  * Confirmed ACP spawn. The host child always uses `spawn(file, args, {shell:false})`.
@@ -37,6 +36,8 @@ export type LaunchInspection = {
   source: LaunchSource;
   spawn: "direct";
   ignoredWrappers: LaunchCollision[];
+  /** rc files are read as text; they are never sourced or executed. */
+  wrapperDetection: "rc-scan";
 };
 
 export type CommandClass = {
@@ -50,8 +51,10 @@ export interface CommandClassifier {
 }
 
 const SAFE_NAME = /^[A-Za-z][A-Za-z0-9._+-]{0,63}$/;
-const SHELL_PROBE_MS = 1_200;
+const MAX_RC_FILES = 16;
+const MAX_RC_BYTES = 256_000;
 const cache = new Map<string, LaunchCollision[]>();
+const rcCache = new Map<string, Map<string, CommandClass>>();
 
 export function inspectLaunch(options: {
   executable?: string;
@@ -68,6 +71,7 @@ export function inspectLaunch(options: {
     argv: formatArgv(executable, options.args),
     source: options.source,
     spawn: "direct",
+    wrapperDetection: "rc-scan",
     ignoredWrappers: inspectCollisions(options.collisionNames, {
       officialExecutable: executable,
       env: options.env,
@@ -122,6 +126,29 @@ export function resolveOnPath(name: string, env: NodeJS.ProcessEnv = process.env
   return findAllOnPath(name, env)[0];
 }
 
+/**
+ * Official CLI file only. `envName` (CURSOR_AGENT_BIN / GROK_BIN / AGY_ACP_BIN)
+ * wins when it is an absolute existing file. PATH is last.
+ */
+export function resolveOfficialCli(
+  name: string,
+  options: { envName?: string; env?: NodeJS.ProcessEnv } = {},
+): { executable: string; source: LaunchSource } | undefined {
+  if (!SAFE_NAME.test(name) && !path.isAbsolute(name)) return undefined;
+  const env = options.env ?? process.env;
+  const envName = options.envName;
+  const explicit = envName ? env[envName]?.trim() : undefined;
+  if (explicit) {
+    if (!path.isAbsolute(explicit) || explicit.includes("\0")) {
+      throw new Error(`${envName} must be an absolute filesystem path to the official CLI.`);
+    }
+    if (!isExecutableFile(explicit)) return undefined;
+    return { executable: explicit, source: "env" };
+  }
+  const fromPath = findAllOnPath(name, env)[0];
+  return fromPath ? { executable: fromPath, source: "path" } : undefined;
+}
+
 export function findAllOnPath(name: string, env: NodeJS.ProcessEnv = process.env): string[] {
   if (!SAFE_NAME.test(name) && !path.isAbsolute(name)) return [];
   if (path.isAbsolute(name)) return isExecutableFile(name) ? [name] : [];
@@ -163,6 +190,7 @@ export function selectedLaunchNote(launch: LaunchInspection): string {
 
 export function resetLaunchInspectCache(): void {
   cache.clear();
+  rcCache.clear();
 }
 
 const defaultClassifier: CommandClassifier = {
@@ -175,9 +203,9 @@ const defaultClassifier: CommandClassifier = {
 };
 
 /**
- * Classify a command the way the user's interactive shell would, without
- * invoking it. A user `cursor-agent` / `grok` / `agy` function that checks
- * the network must never run.
+ * Classify user wrappers by reading rc files as text. Never source the rc
+ * and never invoke the command — a network check inside `agy()` / `grok()`
+ * / `cursor-agent()` must not run during setup.
  */
 export function classifyShellCommand(name: string, env: NodeJS.ProcessEnv = process.env): CommandClass | undefined {
   return classifyShellCommands([name], env).get(name);
@@ -189,10 +217,11 @@ export function classifyShellCommands(
 ): Map<string, CommandClass | undefined> {
   const classified = new Map<string, CommandClass | undefined>();
   const safe = names.filter((name) => SAFE_NAME.test(name));
-  if (safe.length === 0 || process.platform === "win32") return classified;
-  for (const shell of probeShells(env)) {
-    const batch = classifyWithShell(shell, safe, env);
-    if (batch.size > 0) return batch;
+  if (safe.length === 0) return classified;
+  const scanned = scanRcWrappers(env);
+  for (const name of safe) {
+    const found = scanned.get(name);
+    if (found) classified.set(name, found);
   }
   return classified;
 }
@@ -208,81 +237,100 @@ function classifyAll(
   return classified;
 }
 
-function probeShells(env: NodeJS.ProcessEnv): string[] {
-  const shells: string[] = [];
-  const seen = new Set<string>();
-  const add = (value: string | undefined) => {
-    if (!value || seen.has(value) || !isExecutableFile(value)) return;
-    seen.add(value);
-    shells.push(value);
-  };
-  add(env.SHELL?.trim());
-  add(resolveOnPath("bash", env));
-  add(resolveOnPath("zsh", env));
-  return shells.slice(0, 1);
-}
-
-function classifyWithShell(
-  shell: string,
-  names: string[],
-  env: NodeJS.ProcessEnv,
-): Map<string, CommandClass | undefined> {
-  const classified = new Map<string, CommandClass | undefined>();
-  const flavor = path.basename(shell) === "zsh" ? "zsh" : "bash";
-  const script = flavor === "zsh"
-    ? names.map((name) => `whence -w -- ${name}`).join("; print -r -- __ACP__; ")
-    : names.map((name) => `type -t -- ${name}`).join("; printf '%s\\n' __ACP__; ");
-  const result = spawnSync(shell, ["-ic", script], {
-    encoding: "utf8",
-    timeout: SHELL_PROBE_MS,
-    windowsHide: true,
-    shell: false,
-    env: {
-      HOME: env.HOME,
-      PATH: env.PATH,
-      USER: env.USER,
-      LOGNAME: env.LOGNAME,
-      SHELL: shell,
-      TERM: "dumb",
-      PS1: "\\$ ",
-      ZDOTDIR: env.ZDOTDIR,
-    },
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (result.error) return classified;
-  const output = typeof result.stdout === "string" ? result.stdout : "";
-  const chunks = output.split(/(?:^|\n)__ACP__(?:\n|$)/);
-  names.forEach((name, index) => {
-    const chunk = chunks[index] ?? "";
-    const parsed = flavor === "zsh" ? parseZshWhence(chunk) : parseBashType(chunk);
-    if (parsed) classified.set(name, parsed);
-  });
-  return classified;
-}
-
-function parseBashType(output: string): CommandClass | undefined {
-  for (const line of linesFromEnd(output)) {
-    if (line === "function" || line === "alias" || line === "builtin" || line === "keyword") {
-      return { kind: line };
+function scanRcWrappers(env: NodeJS.ProcessEnv): Map<string, CommandClass> {
+  const key = `${env.HOME ?? ""}|${env.ZDOTDIR ?? ""}`;
+  const cached = rcCache.get(key);
+  if (cached) return cached;
+  const found = new Map<string, CommandClass>();
+  const visited = new Set<string>();
+  const queue = rcSeedFiles(env);
+  while (queue.length > 0 && visited.size < MAX_RC_FILES) {
+    const file = queue.shift();
+    if (!file || visited.has(file)) continue;
+    visited.add(file);
+    const text = readRcText(file);
+    if (!text) continue;
+    for (const wrapper of parseRcWrappers(text)) {
+      const previous = found.get(wrapper.name);
+      if (!previous || (previous.kind === "alias" && wrapper.kind === "function")) {
+        found.set(wrapper.name, { kind: wrapper.kind });
+      }
     }
-    if (line === "file") return { kind: "file" };
+    for (const sourced of parseRcSources(text, env)) {
+      if (!visited.has(sourced)) queue.push(sourced);
+    }
   }
-  return undefined;
+  rcCache.set(key, found);
+  return found;
 }
 
-function parseZshWhence(output: string): CommandClass | undefined {
-  for (const line of linesFromEnd(output)) {
-    const match = /:\s*(function|alias|command|builtin|hashed|reserved)\s*$/.exec(line);
+function rcSeedFiles(env: NodeJS.ProcessEnv): string[] {
+  const home = env.HOME?.trim();
+  const zdot = env.ZDOTDIR?.trim() || home;
+  const files: string[] = [];
+  if (home) {
+    files.push(
+      path.join(home, ".bashrc"),
+      path.join(home, ".bash_profile"),
+      path.join(home, ".bash_aliases"),
+      path.join(home, ".profile"),
+    );
+  }
+  if (zdot) {
+    files.push(path.join(zdot, ".zshrc"), path.join(zdot, ".zshenv"), path.join(zdot, ".zprofile"));
+  }
+  return files;
+}
+
+function readRcText(file: string): string | undefined {
+  try {
+    if (!existsSync(file) || !statSync(file).isFile()) return undefined;
+    const text = readFileSync(file, { encoding: "utf8" });
+    return text.length > MAX_RC_BYTES ? text.slice(0, MAX_RC_BYTES) : text;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRcWrappers(text: string): Array<{ name: string; kind: "function" | "alias" }> {
+  const found: Array<{ name: string; kind: "function" | "alias" }> = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*#.*$/, "").trim();
+    if (!line) continue;
+    const fn = /^(?:function\s+)([A-Za-z][A-Za-z0-9._+-]*)(?:\s*\(\))?/.exec(line)
+      ?? /^([A-Za-z][A-Za-z0-9._+-]*)\s*\(\)/.exec(line);
+    if (fn && SAFE_NAME.test(fn[1])) {
+      found.push({ name: fn[1], kind: "function" });
+      continue;
+    }
+    const alias = /^alias\s+(?:--\s+)?([A-Za-z][A-Za-z0-9._+-]*)=/.exec(line);
+    if (alias && SAFE_NAME.test(alias[1])) found.push({ name: alias[1], kind: "alias" });
+  }
+  return found;
+}
+
+function parseRcSources(text: string, env: NodeJS.ProcessEnv): string[] {
+  const home = env.HOME?.trim();
+  if (!home) return [];
+  const files: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const match = /^\s*(?:source|\.)\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(raw);
     if (!match) continue;
-    if (match[1] === "command" || match[1] === "hashed") return { kind: "file" };
-    if (match[1] === "reserved") return { kind: "keyword" };
-    return { kind: match[1] as LaunchCollisionKind };
+    const spec = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (!spec || /[;|`$()\\]/.test(spec)) continue;
+    const resolved = spec.startsWith("~/")
+      ? path.join(home, spec.slice(2))
+      : spec === "~"
+        ? home
+        : spec.startsWith("$HOME/")
+          ? path.join(home, spec.slice(6))
+          : spec;
+    if (!path.isAbsolute(resolved)) continue;
+    const normalized = path.resolve(resolved);
+    if (!normalized.startsWith(path.resolve(home) + path.sep) && normalized !== path.resolve(home)) continue;
+    files.push(normalized);
   }
-  return undefined;
-}
-
-function linesFromEnd(output: string): string[] {
-  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).reverse();
+  return files;
 }
 
 function addCollision(found: LaunchCollision[], seen: Set<string>, collision: LaunchCollision): void {

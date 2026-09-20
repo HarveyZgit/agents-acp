@@ -11,7 +11,7 @@ import {
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
 import { parseListModelsOutput, type EffortLevel, type ModelCatalog } from "../models.ts";
-import { collisionNamesFor, inspectLaunch, resolveOnPath, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
+import { collisionNamesFor, inspectLaunch, resolveOfficialCli, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
 
 const EXECUTABLE = "grok";
 const GROK_ARGS = ["--no-auto-update", "--cwd", "<workspace>", "agent", "--no-leader", "stdio"];
@@ -31,7 +31,11 @@ export class GrokProvider extends AcpProvider {
   }
 
   get executable(): string {
-    return resolveOnPath(EXECUTABLE) ?? EXECUTABLE;
+    try {
+      return resolveOfficialCli(EXECUTABLE, { envName: "GROK_BIN" })?.executable ?? EXECUTABLE;
+    } catch {
+      return EXECUTABLE;
+    }
   }
 
   discover(): ProviderAvailability {

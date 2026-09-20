@@ -497,7 +497,7 @@ function configSnapshot(suggestedWorkspace?: string) {
 function launchSetupQuestion(providers: Array<{ provider: string; launch?: { argv?: string; ignoredWrappers?: unknown[] } }>) {
   return {
     id: "confirmedLaunch",
-    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}) for every CLI agent. Report each provider launch to the user. Do not invoke ignoredWrappers from the host shell — a user cursor-agent, grok, or agy function that checks the network first is detected and never followed.",
+    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}) for every CLI agent. Wrapper detection is rc-scan: rc files are read as text and never sourced. Report each provider launch to the user. Do not invoke ignoredWrappers from the host shell — a user cursor-agent, grok, or agy function that checks the network first is detected and never followed.",
     readOnly: true,
     launches: providers.flatMap((provider) => (
       provider.launch ? [{ provider: provider.provider, ...provider.launch }] : []

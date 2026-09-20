@@ -8,6 +8,7 @@ import {
   inspectCollisions,
   inspectLaunch,
   resetLaunchInspectCache,
+  resolveOfficialCli,
 } from "../src/acp/launch-inspect.ts";
 
 function isolatedHome(): string {
@@ -65,7 +66,7 @@ test("inspectCollisions classifies an injected function without invoking it", ()
   assert.equal(existsSync(join(home, "classifier-called")), true);
 });
 
-test("default shell probe can see bash functions for every CLI agent and still does not run them", () => {
+test("rc-scan sees bash functions for every CLI agent and still does not run them", () => {
   const home = isolatedHome();
   const bin = join(home, "bin");
   mkdirSync(bin);
@@ -97,8 +98,60 @@ test("default shell probe can see bash functions for every CLI agent and still d
   for (const name of names) {
     assert.ok(collisions.some((item) => item.name === name && item.kind === "file"));
     const fn = collisions.find((item) => item.name === name && item.kind === "function");
-    if (fn) assert.equal(fn.followed, false);
+    assert.ok(fn, `${name} function must be detected from .bashrc text`);
+    assert.equal(fn.followed, false);
   }
+});
+
+test("rc-scan never sources rc so top-level network checks do not run", () => {
+  const home = isolatedHome();
+  const marker = join(home, "rc-ran");
+  writeFileSync(join(home, ".bashrc"), [
+    `touch "${marker}"`,
+    "curl -s https://example.invalid >/dev/null",
+    "agy() {",
+    `  touch "${marker}"`,
+    "}",
+    "alias grok='touch marker'",
+    "",
+  ].join("\n"));
+  writeFileSync(join(home, ".zshrc"), "cursor-agent() { echo zsh; }\n");
+  const collisions = inspectCollisions(["agy", "grok", "cursor-agent"], {
+    env: { HOME: home, PATH: join(home, "empty") },
+  });
+  assert.equal(existsSync(marker), false);
+  assert.ok(collisions.some((item) => item.name === "agy" && item.kind === "function"));
+  assert.ok(collisions.some((item) => item.name === "grok" && item.kind === "alias"));
+  assert.ok(collisions.some((item) => item.name === "cursor-agent" && item.kind === "function"));
+});
+
+test("CURSOR_AGENT_BIN / GROK_BIN pin the official file over a PATH script", () => {
+  const home = isolatedHome();
+  const bin = join(home, "bin");
+  const officialDir = join(home, "official");
+  mkdirSync(bin);
+  mkdirSync(officialDir);
+  const wrapper = join(bin, "cursor-agent");
+  const official = join(officialDir, "cursor-agent");
+  writeFileSync(wrapper, "#!/bin/sh\necho wrapper\n");
+  writeFileSync(official, "#!/bin/sh\necho official\n");
+  chmodSync(wrapper, 0o755);
+  chmodSync(official, 0o755);
+  const resolved = resolveOfficialCli("cursor-agent", {
+    envName: "CURSOR_AGENT_BIN",
+    env: { HOME: home, PATH: bin, CURSOR_AGENT_BIN: official },
+  });
+  assert.deepEqual(resolved, { executable: official, source: "env" });
+  const launch = inspectLaunch({
+    executable: official,
+    args: ["acp"],
+    source: "env",
+    collisionNames: ["cursor-agent"],
+    env: { HOME: home, PATH: bin, CURSOR_AGENT_BIN: official },
+    classifier: { classify: () => undefined },
+  });
+  assert.equal(launch.wrapperDetection, "rc-scan");
+  assert.ok(launch.ignoredWrappers.some((item) => item.name === "cursor-agent" && item.path === wrapper));
 });
 
 test("setup inspects cursor-agent, grok, and agy wrappers without invoking them", () => {

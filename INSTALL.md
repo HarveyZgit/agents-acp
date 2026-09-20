@@ -14,11 +14,12 @@ or Antigravity ACP.
   (`cursor-agent`), Grok Build CLI (`grok`), and/or official Antigravity
   ACP server (`agy_acp_server.par` / `antigravity-acp`, or `AGY_ACP_BIN`).
   Do not wrap the `agy` TUI. Do not install or authenticate a provider just
-  to use this plugin. `$config` probes the official filesystem binary for
-  every CLI agent (`cursor-agent`, `grok`, `agy_acp_server.par`) and
-  ignores user shell functions, aliases, and colliding PATH files (for
-  example a `cursor-agent` / `grok` / `agy` function that checks the
-  network first).
+  to use this plugin. `$config` reads rc files as text (never sources them)
+  and confirms the official filesystem binary for every CLI agent
+  (`cursor-agent`, `grok`, `agy_acp_server.par`). User functions/aliases
+  that check the network first are reported and not followed. Pin with
+  `CURSOR_AGENT_BIN` / `GROK_BIN` / `AGY_ACP_BIN` if a PATH script would
+  otherwise win.
 
 ## 1. Configure the workspace boundary
 
@@ -83,7 +84,7 @@ they exist in its own environment, and they override the config file:
 `EXTERNAL_ACP_ENV_MODE`, `EXTERNAL_ACP_CURSOR_ENV_PASSTHROUGH`, and the
 provider/session variables (`HOME`, `PATH`, `SHELL`, `SSH_AUTH_SOCK`,
 `SECURITYSESSIONID`, `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`,
-`AGENT_CLI_CREDENTIAL_STORE`, `XAI_API_KEY`, `AGY_ACP_BIN`,
+`AGENT_CLI_CREDENTIAL_STORE`, `XAI_API_KEY`, `CURSOR_AGENT_BIN`, `GROK_BIN`, `AGY_ACP_BIN`,
 `GEMINI_API_KEY`, `GOOGLE_API_KEY`, …).
 Never put secret values in the plugin manifest; `env_vars` forwards names only.
 
