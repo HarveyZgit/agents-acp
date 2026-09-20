@@ -14,9 +14,11 @@ import {
 import { readAuthMethods } from "./cursor.ts";
 import { parseSessionModels, type CatalogModel, type ModelCatalog } from "../models.ts";
 import {
+  collisionNamesFor,
   inspectLaunch,
   isExecutableFile,
   pathEntries,
+  selectedLaunchNote,
   type CommandClassifier,
   type LaunchInspection,
   type LaunchSource,
@@ -137,7 +139,7 @@ export class AntigravityProvider extends AcpProvider {
       executable: resolved.executable,
       capabilities: this.capabilities,
       note: loggedIn
-        ? `${launchNote(launch)} Model is session/set_config_option {configId:\"model\"}; effort is a Gemini slug suffix. Modes stay on default — never yolo or auto_edit.`
+        ? `${selectedLaunchNote(launch)} Model is session/set_config_option {configId:\"model\"}; effort is a Gemini slug suffix. Modes stay on default — never yolo or auto_edit.`
         : `Binary found at ${resolved.executable}, but no ~/.gemini/antigravity-acp/acp_token.json or GEMINI_API_KEY / GOOGLE_API_KEY is visible. Log in via the Antigravity IDE or Zed first; do not expect headless OAuth in this child.`,
       launch,
     };
@@ -222,7 +224,7 @@ export class AntigravityProvider extends AcpProvider {
       executable: resolved?.executable,
       args: resolved?.args ?? officialArgs(),
       source: resolved?.source ?? (resolved ? "path" : "missing"),
-      collisionNames: [...REJECTED_NAMES],
+      collisionNames: collisionNamesFor("antigravity"),
       classifier: this.classifier,
     });
   }
@@ -230,15 +232,6 @@ export class AntigravityProvider extends AcpProvider {
 
 function officialArgs(): string[] {
   return ["--uid="];
-}
-
-function launchNote(launch: LaunchInspection): string {
-  const wrappers = launch.ignoredWrappers
-    .map((wrapper) => `${wrapper.name} (${wrapper.kind})`)
-    .join(", ");
-  return wrappers
-    ? `Selected ACP launch: ${launch.argv} (shell:false). Ignored user wrappers: ${wrappers}.`
-    : `Selected ACP launch: ${launch.argv} (shell:false). User agy functions/aliases are not followed.`;
 }
 
 function rejectUnofficialName(name: string, explicitBin: boolean): void {

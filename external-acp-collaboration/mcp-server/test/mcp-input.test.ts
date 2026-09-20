@@ -138,9 +138,11 @@ test("MCP get_config and configure write centralized defaults, not project .agen
   assert.ok(launchQuestion, "setup must include confirmedLaunch");
   assert.equal(launchQuestion.readOnly, true);
   assert.ok(Array.isArray(launchQuestion.launches));
-  assert.ok(before.providers.some((provider: { provider: string; launch?: { spawn?: string } }) => (
-    provider.provider === "antigravity" && provider.launch?.spawn === "direct"
-  )));
+  for (const name of ["cursor", "grok", "antigravity"]) {
+    assert.ok(before.providers.some((provider: { provider: string; launch?: { spawn?: string } }) => (
+      provider.provider === name && provider.launch?.spawn === "direct"
+    )), `${name} must confirm a direct spawn`);
+  }
 
   const after = JSON.parse(saved.result.content[0].text);
   assert.equal(after.needsSetup, false);

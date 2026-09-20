@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  CLI_WRAPPER_NAMES,
   inspectCollisions,
   inspectLaunch,
   resetLaunchInspectCache,
@@ -64,24 +65,26 @@ test("inspectCollisions classifies an injected function without invoking it", ()
   assert.equal(existsSync(join(home, "classifier-called")), true);
 });
 
-test("default shell probe can see a bash function and still does not run it", () => {
+test("default shell probe can see bash functions for every CLI agent and still does not run them", () => {
   const home = isolatedHome();
   const bin = join(home, "bin");
   mkdirSync(bin);
-  const marker = join(home, "agy-ran");
-  const wrapper = join(bin, "agy");
-  writeFileSync(wrapper, `#!/bin/sh\ntouch "${marker}"\n`);
-  chmodSync(wrapper, 0o755);
-  writeFileSync(join(home, ".bashrc"), [
-    "agy() {",
+  const marker = join(home, "cli-ran");
+  const names = ["cursor-agent", "grok", "agy"];
+  for (const name of names) {
+    writeFileSync(join(bin, name), `#!/bin/sh\ntouch "${marker}"\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  writeFileSync(join(home, ".bashrc"), names.flatMap((name) => [
+    `${name}() {`,
     `  touch "${marker}"`,
     "  echo networked",
     "}",
     "",
-  ].join("\n"));
+  ]).join("\n"));
 
-  const collisions = inspectCollisions(["agy"], {
-    officialExecutable: join(home, "agy_acp_server.par"),
+  const collisions = inspectCollisions(names, {
+    officialExecutable: join(home, "official-bin"),
     env: {
       HOME: home,
       PATH: bin,
@@ -91,9 +94,37 @@ test("default shell probe can see a bash function and still does not run it", ()
   });
 
   assert.equal(existsSync(marker), false);
-  assert.ok(collisions.some((item) => item.name === "agy" && item.kind === "file" && item.path === wrapper));
-  const fn = collisions.find((item) => item.name === "agy" && item.kind === "function");
-  if (fn) assert.equal(fn.followed, false);
+  for (const name of names) {
+    assert.ok(collisions.some((item) => item.name === name && item.kind === "file"));
+    const fn = collisions.find((item) => item.name === name && item.kind === "function");
+    if (fn) assert.equal(fn.followed, false);
+  }
+});
+
+test("setup inspects cursor-agent, grok, and agy wrappers without invoking them", () => {
+  const home = isolatedHome();
+  const names = ["cursor-agent", "grok", "agy"];
+  const launch = inspectLaunch({
+    executable: "/opt/cursor-agent",
+    args: ["acp"],
+    source: "path",
+    collisionNames: names,
+    env: { HOME: home, PATH: join(home, "empty") },
+    classifier: {
+      classify(name) {
+        return names.includes(name) ? { kind: "function" } : undefined;
+      },
+    },
+  });
+  assert.deepEqual(
+    launch.ignoredWrappers.map((item) => item.name).sort(),
+    [...names].sort(),
+  );
+  assert.ok(launch.ignoredWrappers.every((item) => item.kind === "function" && item.followed === false));
+  assert.deepEqual([...CLI_WRAPPER_NAMES.cursor], ["cursor-agent", "cursor", "agent"]);
+  assert.deepEqual([...CLI_WRAPPER_NAMES.grok], ["grok"]);
+  assert.ok(CLI_WRAPPER_NAMES.antigravity.includes("agy"));
+  assert.ok(CLI_WRAPPER_NAMES.antigravity.includes("antigravity"));
 });
 
 test("official executable on PATH is not listed as a wrapper", () => {

@@ -14,9 +14,11 @@ or Antigravity ACP.
   (`cursor-agent`), Grok Build CLI (`grok`), and/or official Antigravity
   ACP server (`agy_acp_server.par` / `antigravity-acp`, or `AGY_ACP_BIN`).
   Do not wrap the `agy` TUI. Do not install or authenticate a provider just
-  to use this plugin. `$config` probes the official filesystem binary and
+  to use this plugin. `$config` probes the official filesystem binary for
+  every CLI agent (`cursor-agent`, `grok`, `agy_acp_server.par`) and
   ignores user shell functions, aliases, and colliding PATH files (for
-  example an `agy` function that checks the network first).
+  example a `cursor-agent` / `grok` / `agy` function that checks the
+  network first).
 
 ## 1. Configure the workspace boundary
 

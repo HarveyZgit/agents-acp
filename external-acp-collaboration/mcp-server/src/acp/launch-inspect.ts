@@ -6,6 +6,19 @@ import { spawnSync } from "node:child_process";
  * Confirmed ACP spawn. The host child always uses `spawn(file, args, {shell:false})`.
  * User aliases, functions, and colliding PATH files are reported and never followed.
  */
+
+export type InspectableProvider = "cursor" | "grok" | "antigravity";
+
+/** Official CLI names plus common user wrappers, inspected for every provider. */
+export const CLI_WRAPPER_NAMES: Record<InspectableProvider, readonly string[]> = {
+  cursor: ["cursor-agent", "cursor", "agent"],
+  grok: ["grok"],
+  antigravity: ["agy_acp_server.par", "antigravity-acp", "agy", "antigravity"],
+};
+
+export function collisionNamesFor(provider: InspectableProvider): string[] {
+  return [...CLI_WRAPPER_NAMES[provider]];
+}
 export type LaunchSource = "env" | "managed" | "path" | "missing";
 
 export type LaunchCollisionKind = "function" | "alias" | "file" | "builtin" | "keyword" | "unknown";
@@ -33,6 +46,7 @@ export type CommandClass = {
 
 export interface CommandClassifier {
   classify(name: string, env?: NodeJS.ProcessEnv): CommandClass | undefined;
+  classifyMany?(names: string[], env?: NodeJS.ProcessEnv): Map<string, CommandClass | undefined>;
 }
 
 const SAFE_NAME = /^[A-Za-z][A-Za-z0-9._+-]{0,63}$/;
@@ -78,13 +92,14 @@ export function inspectCollisions(
   const found: LaunchCollision[] = [];
   const seen = new Set<string>();
   const classifier = options.classifier ?? defaultClassifier;
+  const classifiedByName = classifyAll(classifier, names, env);
   for (const name of names) {
     if (!SAFE_NAME.test(name)) continue;
     for (const file of findAllOnPath(name, env)) {
       if (samePath(file, options.officialExecutable)) continue;
       addCollision(found, seen, { name, kind: "file", path: file, followed: false });
     }
-    const classified = classifier.classify(name, env);
+    const classified = classifiedByName.get(name);
     if (!classified) continue;
     if (classified.kind === "file") {
       if (!classified.path || samePath(classified.path, options.officialExecutable)) continue;
@@ -137,6 +152,15 @@ export function formatArgv(executable: string | undefined, args: string[]): stri
   return [executable, ...args].filter((part) => part !== undefined && part !== "").join(" ");
 }
 
+export function selectedLaunchNote(launch: LaunchInspection): string {
+  const wrappers = launch.ignoredWrappers
+    .map((wrapper) => `${wrapper.name} (${wrapper.kind})`)
+    .join(", ");
+  return wrappers
+    ? `Selected ACP launch: ${launch.argv} (shell:false). Ignored user wrappers: ${wrappers}.`
+    : `Selected ACP launch: ${launch.argv} (shell:false). User shell functions, aliases, and colliding PATH files for this CLI are not followed.`;
+}
+
 export function resetLaunchInspectCache(): void {
   cache.clear();
 }
@@ -145,19 +169,43 @@ const defaultClassifier: CommandClassifier = {
   classify(name, env = process.env) {
     return classifyShellCommand(name, env);
   },
+  classifyMany(names, env = process.env) {
+    return classifyShellCommands(names, env);
+  },
 };
 
 /**
  * Classify a command the way the user's interactive shell would, without
- * invoking it. `agy` as a function that checks the network must never run.
+ * invoking it. A user `cursor-agent` / `grok` / `agy` function that checks
+ * the network must never run.
  */
 export function classifyShellCommand(name: string, env: NodeJS.ProcessEnv = process.env): CommandClass | undefined {
-  if (!SAFE_NAME.test(name) || process.platform === "win32") return undefined;
+  return classifyShellCommands([name], env).get(name);
+}
+
+export function classifyShellCommands(
+  names: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Map<string, CommandClass | undefined> {
+  const classified = new Map<string, CommandClass | undefined>();
+  const safe = names.filter((name) => SAFE_NAME.test(name));
+  if (safe.length === 0 || process.platform === "win32") return classified;
   for (const shell of probeShells(env)) {
-    const classified = classifyWithShell(shell, name, env);
-    if (classified) return classified;
+    const batch = classifyWithShell(shell, safe, env);
+    if (batch.size > 0) return batch;
   }
-  return undefined;
+  return classified;
+}
+
+function classifyAll(
+  classifier: CommandClassifier,
+  names: string[],
+  env: NodeJS.ProcessEnv,
+): Map<string, CommandClass | undefined> {
+  if (classifier.classifyMany) return classifier.classifyMany(names, env);
+  const classified = new Map<string, CommandClass | undefined>();
+  for (const name of names) classified.set(name, classifier.classify(name, env));
+  return classified;
 }
 
 function probeShells(env: NodeJS.ProcessEnv): string[] {
@@ -174,12 +222,17 @@ function probeShells(env: NodeJS.ProcessEnv): string[] {
   return shells.slice(0, 1);
 }
 
-function classifyWithShell(shell: string, name: string, env: NodeJS.ProcessEnv): CommandClass | undefined {
+function classifyWithShell(
+  shell: string,
+  names: string[],
+  env: NodeJS.ProcessEnv,
+): Map<string, CommandClass | undefined> {
+  const classified = new Map<string, CommandClass | undefined>();
   const flavor = path.basename(shell) === "zsh" ? "zsh" : "bash";
-  const args = flavor === "zsh"
-    ? ["-ic", `whence -w -- ${name}`]
-    : ["-ic", `type -t -- ${name}`];
-  const result = spawnSync(shell, args, {
+  const script = flavor === "zsh"
+    ? names.map((name) => `whence -w -- ${name}`).join("; print -r -- __ACP__; ")
+    : names.map((name) => `type -t -- ${name}`).join("; printf '%s\\n' __ACP__; ");
+  const result = spawnSync(shell, ["-ic", script], {
     encoding: "utf8",
     timeout: SHELL_PROBE_MS,
     windowsHide: true,
@@ -196,9 +249,15 @@ function classifyWithShell(shell: string, name: string, env: NodeJS.ProcessEnv):
     },
     stdio: ["ignore", "pipe", "ignore"],
   });
-  if (result.error || (result.status !== 0 && result.status !== 1)) return undefined;
+  if (result.error) return classified;
   const output = typeof result.stdout === "string" ? result.stdout : "";
-  return flavor === "zsh" ? parseZshWhence(output) : parseBashType(output);
+  const chunks = output.split(/(?:^|\n)__ACP__(?:\n|$)/);
+  names.forEach((name, index) => {
+    const chunk = chunks[index] ?? "";
+    const parsed = flavor === "zsh" ? parseZshWhence(chunk) : parseBashType(chunk);
+    if (parsed) classified.set(name, parsed);
+  });
+  return classified;
 }
 
 function parseBashType(output: string): CommandClass | undefined {

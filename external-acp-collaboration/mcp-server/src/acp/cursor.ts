@@ -9,7 +9,7 @@ import {
   type StartOptions,
 } from "./provider.ts";
 import { composeCursorLaunchId, parseListModelsOutput, type ModelCatalog } from "../models.ts";
-import { inspectLaunch, resolveOnPath, type CommandClassifier } from "./launch-inspect.ts";
+import { collisionNamesFor, inspectLaunch, resolveOnPath, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
 
 /**
  * Only the official `cursor-agent` binary is used. `cursor` is the desktop
@@ -58,7 +58,7 @@ type ResolvedCursorLaunch = {
   version?: string;
 };
 
-const CURSOR_COLLISIONS = ["cursor", "agent"];
+const CURSOR_COLLISIONS = collisionNamesFor("cursor");
 
 class ProcessCursorProbe implements CursorProbe {
   run(executable: string, args: string[], env: NodeJS.ProcessEnv = probeEnvironment()): CursorProbeResult {
@@ -114,7 +114,7 @@ export class CursorProvider extends AcpProvider {
         available: false,
         executable: EXECUTABLE,
         capabilities: this.capabilities,
-        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`.",
+        note: "cursor-agent was not found on PATH or does not support `cursor-agent acp`. This provider never falls back to `cursor` or `agent`, and does not follow a user cursor-agent function or alias.",
         launch,
       };
     }
@@ -131,7 +131,7 @@ export class CursorProvider extends AcpProvider {
       executable: resolved.executable,
       version: resolved.version,
       capabilities: this.capabilities,
-      note: `Selected ACP launch: ${launch.argv} (shell:false). Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast). User cursor/agent wrappers are not followed.`,
+      note: `${selectedLaunchNote(launch)} Optional start.model is a catalog id; start.effort (high) and start.speed (fast) are persisted separately and composed into the launch id (for example composer-2.5-high-fast).`,
       launch,
     };
   }

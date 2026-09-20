@@ -11,7 +11,7 @@ import {
 } from "./provider.ts";
 import { readAuthMethods } from "./cursor.ts";
 import { parseListModelsOutput, type EffortLevel, type ModelCatalog } from "../models.ts";
-import { inspectLaunch, resolveOnPath, type CommandClassifier } from "./launch-inspect.ts";
+import { collisionNamesFor, inspectLaunch, resolveOnPath, selectedLaunchNote, type CommandClassifier } from "./launch-inspect.ts";
 
 const EXECUTABLE = "grok";
 const GROK_ARGS = ["--no-auto-update", "--cwd", "<workspace>", "agent", "--no-leader", "stdio"];
@@ -40,7 +40,7 @@ export class GrokProvider extends AcpProvider {
       executable: discovered.available ? discovered.executable : undefined,
       args: GROK_ARGS,
       source: discovered.available ? "path" : "missing",
-      collisionNames: [EXECUTABLE],
+      collisionNames: collisionNamesFor("grok"),
       classifier: this.classifier,
     });
     if (!discovered.available) {
@@ -54,7 +54,7 @@ export class GrokProvider extends AcpProvider {
     return {
       ...discovered,
       launch,
-      note: `Selected ACP launch: ${launch.argv} (shell:false). Model is optional; omit start.model to use the Grok CLI default. Effort is --effort, not a model-id suffix. User grok functions/aliases are not followed.`,
+      note: `${selectedLaunchNote(launch)} Model is optional; omit start.model to use the Grok CLI default. Effort is --effort, not a model-id suffix.`,
     };
   }
 

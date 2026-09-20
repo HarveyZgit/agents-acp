@@ -25,10 +25,11 @@ newline-delimited JSON-RPC ACP over stdio, and normalizes provider output into
 transport and lifecycle behavior. `cursor.ts`, `grok.ts`, and
 `antigravity.ts` contain only provider-specific executable, authentication,
 model, and launch details. Antigravity never wraps the `agy` TUI.
-`$config` inspects the official binary and reports the exact spawn argv
-(`shell:false`). User-modified commands — for example an `agy` shell
-function that checks the network first — are detected as `ignoredWrappers`
-and are not followed.
+`$config` inspects every CLI agent (`cursor-agent`, `grok`,
+`agy_acp_server.par`) and reports the exact spawn argv (`shell:false`).
+User-modified commands — a `cursor-agent`, `grok`, or `agy` shell function
+that checks the network first — are detected as `ignoredWrappers` and are
+not followed.
 
 The persistent local store contains run IDs, session IDs, safe status metadata,
 and changed-file summaries. It never writes task prompts, credentials, or

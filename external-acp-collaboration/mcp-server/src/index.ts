@@ -59,7 +59,7 @@ const tools = [
     type: "object",
     properties: {},
   }),
-  tool("get_config", "Return centralized runtime paths, defaults, setup questions, and confirmed official spawn argv. Reports user command wrappers (agy functions, cursor/agent aliases) that will not be followed. Does not write project-local files.", {
+  tool("get_config", "Return centralized runtime paths, defaults, setup questions, and confirmed official spawn argv for every CLI agent (cursor-agent, grok, Antigravity). Reports user command wrappers (functions, aliases, colliding PATH files) that will not be followed. Does not write project-local files.", {
     type: "object",
     properties: {
       suggestedWorkspace: {
@@ -212,7 +212,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: { listChanged: false } },
         serverInfo: { name: "agents-acp", version: SERVER_VERSION },
-        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Report providers[].launch and confirmedLaunch: spawn the official argv with shell:false and never invoke ignoredWrappers such as an agy function. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
+        instructions: "Call get_config first. If needsSetup, ask the user (or use defaults they already named) then call configure. Runtime files stay in the centralized runtimeDir from get_config (~/.codex/agents-acp or ~/.claude/agents-acp); never create a project-local .agents-acp directory. Report providers[].launch and confirmedLaunch for every CLI agent (cursor-agent, grok, agy_acp_server.par): spawn the official argv with shell:false and never invoke ignoredWrappers such as a cursor-agent, grok, or agy function. Runs are confined to the configured workspace. ACP permissions stay pending until a user-confirmed response tool call selects one of the provider's offered optionIds.",
       };
     case "ping":
       return {};
@@ -497,7 +497,7 @@ function configSnapshot(suggestedWorkspace?: string) {
 function launchSetupQuestion(providers: Array<{ provider: string; launch?: { argv?: string; ignoredWrappers?: unknown[] } }>) {
   return {
     id: "confirmedLaunch",
-    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}). Report them to the user. Do not invoke ignoredWrappers from the host shell (for example an agy function that checks the network). Those wrappers are detected and never followed.",
+    prompt: "The plugin confirmed these official spawn argv with spawn(file, args, {shell:false}) for every CLI agent. Report each provider launch to the user. Do not invoke ignoredWrappers from the host shell — a user cursor-agent, grok, or agy function that checks the network first is detected and never followed.",
     readOnly: true,
     launches: providers.flatMap((provider) => (
       provider.launch ? [{ provider: provider.provider, ...provider.launch }] : []

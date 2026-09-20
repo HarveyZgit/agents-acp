@@ -297,6 +297,38 @@ test("Cursor discovery selects only cursor-agent with ACP argv", () => {
   assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
 });
 
+test("Cursor setup reports a cursor-agent function and does not follow cursor/agent", () => {
+  const provider = new CursorProvider(new FixtureCursorProbe({
+    "cursor-agent --version": { status: 0, stdout: "1.2.3\n" },
+    "cursor-agent acp --help": { status: 0, stdout: "Usage: cursor-agent acp\n" },
+  }), {
+    classify: (name) => (
+      name === "cursor-agent" || name === "cursor" || name === "agent"
+        ? { kind: "function" }
+        : undefined
+    ),
+  });
+  const discovery = provider.discover();
+  assert.equal(discovery.available, true);
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.deepEqual(discovery.launch?.args, ["acp"]);
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "cursor-agent" && item.kind === "function" && item.followed === false));
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "cursor" && item.kind === "function"));
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "agent" && item.kind === "function"));
+  assert.match(discovery.note ?? "", /Ignored user wrappers: cursor-agent/);
+  assert.deepEqual(provider.command({ cwd: "/project", prompt: "task", mode: "review" }), ["acp"]);
+});
+
+test("Grok setup reports a grok function and still uses the filesystem executable", () => {
+  const provider = new GrokProvider({
+    classify: (name) => name === "grok" ? { kind: "function" } : undefined,
+  });
+  const discovery = provider.discover();
+  assert.equal(discovery.launch?.spawn, "direct");
+  assert.ok(discovery.launch?.ignoredWrappers.some((item) => item.name === "grok" && item.kind === "function" && item.followed === false));
+  assert.equal(discovery.launch?.args.includes("stdio"), true);
+});
+
 test("Cursor discovery does not fall back to cursor or agent", () => {
   const probe = new FixtureCursorProbe({
     "cursor --version": { status: 0, stdout: "unrelated cursor\n" },

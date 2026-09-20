@@ -85,6 +85,8 @@ test("plugin ships invocable $config and $dispatch skills", () => {
   assert.match(setup, /defaultEffort|defaultSpeed|Fast|High/);
   assert.match(setup, /Do not start an ACP run|do not call `start`/i);
   assert.match(setup, /ignoredWrappers|confirmedLaunch|shell:false/);
+  assert.match(setup, /cursor-agent/);
+  assert.match(setup, /grok/);
   assert.match(setup, /agy/);
 
   const dispatch = bodies.find((body) => /^name:\s*dispatch$/m.test(body)) ?? "";
