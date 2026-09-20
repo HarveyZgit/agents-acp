@@ -73,7 +73,7 @@ const tools = [
     required: ["userConfirmed"],
     properties: {
       workspace: { type: "string", description: "Absolute workspace root." },
-      defaultProvider: { type: "string", enum: ["cursor", "grok", "antigravity"] },
+      defaultProvider: { type: "string", enum: ["cursor", "grok", "antigravity", "agy"] },
       defaultModel: {
         type: "string",
         description: "User keyword or catalog id. Resolved against the agent model list; the raw keyword is never stored. Empty string clears model, effort, and speed.",
@@ -621,7 +621,7 @@ function modelSetupQuestions(catalog?: ModelCatalog) {
     .filter((model, index, all) => all.findIndex((entry) => entry.base === model.base) === index)
     .slice(0, 40)
     .map((model) => ({ id: model.base, label: `${model.label} (${model.base})` }));
-  return [
+  const questions = [
     {
       id: "defaultModel",
       prompt: "Default model keyword or catalog id. The skill must resolve this against the agent model list and persist the catalog id, never the raw keyword.",
@@ -640,9 +640,13 @@ function modelSetupQuestions(catalog?: ModelCatalog) {
         { id: "max", label: "max" },
       ],
     },
+  ];
+  if (catalog?.provider === "antigravity") return questions;
+  return [
+    ...questions,
     {
       id: "defaultSpeed",
-      prompt: "Speed (Fast). Persist separately. Cursor composes this into the launch model id.",
+      prompt: "Speed (Fast). Persist separately. Cursor composes this into the launch model id. Antigravity has no Fast dimension.",
       optional: true,
       options: [
         { id: "fast", label: "Fast" },

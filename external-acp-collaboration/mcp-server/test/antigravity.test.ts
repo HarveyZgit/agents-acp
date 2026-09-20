@@ -30,8 +30,14 @@ test("Antigravity resolves the official binary and never wraps agy", () => {
 
     const binary = fakeBinary(home);
     const found = new AntigravityProvider();
-    assert.equal(found.discover().available, true);
+    assert.equal(found.discover().available, false);
     assert.equal(found.discover().executable, binary);
+    assert.match(found.discover().note ?? "", /Log in via the Antigravity IDE/);
+    mkdirSync(join(home, ".gemini", "antigravity-acp"), { recursive: true });
+    writeFileSync(join(home, ".gemini", "antigravity-acp", "acp_token.json"), "{\"token\":1}");
+    const loggedIn = new AntigravityProvider();
+    assert.equal(loggedIn.discover().available, true);
+    assert.equal(loggedIn.discover().executable, binary);
     assert.deepEqual(found.command({ cwd: home, prompt: "t", mode: "review" }), ["--uid="]);
     assert.equal(found.command({ cwd: home, prompt: "t", mode: "review", model: "gemini-3.8-flash" }).includes("--model"), false);
 

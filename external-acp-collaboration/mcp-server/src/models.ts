@@ -214,13 +214,16 @@ export function composeAntigravityLaunchId(
   const ids = candidateEffortIds(resolvedBase, resolvedEffort);
   if (catalog.length > 0) {
     const available = new Set(catalog.map((model) => model.id));
-    const hit = ids.find((id) => available.has(id));
+    const hit = ids.find((id) => available.has(id) && matchesRequestedEffort(id, resolvedEffort));
     if (hit) return hit;
     const sameBase = catalog.filter((model) => model.base === resolvedBase);
     const byParams = sameBase.find((model) => resolvedEffort === undefined || model.effort === resolvedEffort);
     if (byParams) return byParams.id;
+    if (resolvedEffort) {
+      throw new Error(`No antigravity catalog model matches "${resolvedBase}" with effort ${resolvedEffort}.`);
+    }
     if (sameBase[0]) return sameBase[0].id;
-    throw new Error(`No antigravity catalog model matches "${resolvedBase}" with effort ${resolvedEffort ?? "default"}.`);
+    throw new Error(`No antigravity catalog model matches "${resolvedBase}".`);
   }
   return ids[0] ?? resolvedBase;
 }
@@ -342,6 +345,11 @@ function candidateEffortIds(base: string, effort?: EffortLevel): string[] {
   if (effort) ids.push(`${base}-${effort}`);
   ids.push(base);
   return [...new Set(ids)];
+}
+
+function matchesRequestedEffort(id: string, effort?: EffortLevel): boolean {
+  if (!effort) return true;
+  return parseCatalogId(id).effort === effort;
 }
 
 function rankCatalog(catalog: CatalogModel[], query: string): CatalogModel[] {

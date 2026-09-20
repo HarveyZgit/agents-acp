@@ -117,7 +117,7 @@ export class AntigravityProvider extends AcpProvider {
     const loggedIn = this.cliSessionKnownGood();
     return {
       provider: this.name,
-      available: true,
+      available: loggedIn,
       executable: resolved.executable,
       capabilities: this.capabilities,
       note: loggedIn

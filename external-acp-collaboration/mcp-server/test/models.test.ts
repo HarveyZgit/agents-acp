@@ -111,6 +111,14 @@ gemini-pro-agent - Gemini 3.1 Pro (High)
   assert.equal(resolved?.effort, "high");
   assert.equal(resolved?.launchId, "gemini-3.8-flash-high");
   assert.throws(() => resolveModelSelection([], "flash", "high", undefined, "antigravity"), /catalog is unavailable/);
+  assert.throws(
+    () => composeAntigravityLaunchId("gemini-3.8-flash", "high", parseListModelsOutput("gemini-3.8-flash - Gemini 3.8 Flash\n")),
+    /effort high/,
+  );
+  assert.throws(
+    () => composeAntigravityLaunchId("gemini-3.8-flash", "high", parseListModelsOutput("gemini-3.8-flash-low - Gemini 3.8 Flash (Low)\n")),
+    /effort high/,
+  );
 });
 
 test("parses Antigravity session/new model catalog", () => {
